@@ -5,7 +5,6 @@ import os
 from datetime import datetime, timedelta
 import logging
 from collections import Counter
-import getpass
 import aiohttp
 import re
 
@@ -14,10 +13,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class ViralNewsHunter:
-    def __init__(self, reddit_client_id, reddit_client_secret, telegram_token):
-        self.reddit_client_id = reddit_client_id
-        self.reddit_client_secret = reddit_client_secret
-        self.telegram_token = telegram_token
+    def __init__(self):
+        # Legge le credenziali dalle variabili d'ambiente di Render
+        self.reddit_client_id = os.environ.get('REDDIT_CLIENT_ID')
+        self.reddit_client_secret = os.environ.get('REDDIT_CLIENT_SECRET')
+        self.telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        
+        # Verifica che tutte le variabili siano presenti
+        if not all([self.reddit_client_id, self.reddit_client_secret, self.telegram_token]):
+            raise ValueError("❌ Variabili d'ambiente mancanti! Controlla su Render.com → Settings → Environment")
         
         # Variabili per il tracking delle chat
         self.active_chats = set()
@@ -95,11 +99,11 @@ class ViralNewsHunter:
                 client_secret=self.reddit_client_secret,
                 user_agent='ViralNewsHunter/1.0'
             )
-            print("✅ Connessione Reddit: OK")
+            logger.info("✅ Connessione Reddit: OK")
             return True
             
         except Exception as e:
-            print(f"❌ Errore Reddit: {e}")
+            logger.error(f"❌ Errore Reddit: {e}")
             return False
     
     async def get_active_chats(self):
@@ -376,7 +380,6 @@ class ViralNewsHunter:
         print("📱 Invia un messaggio al bot su Telegram per iniziare")
         print("🚀 Il bot cerca notizie che stanno diventando virali ADESSO")
         print("⏰ Scansione ogni 15 minuti per catturare il momentum virale")
-        print("⏹️ Per fermare: interrompi l'esecuzione della cella\n")
         
         while True:
             try:
@@ -420,7 +423,7 @@ class ViralNewsHunter:
                     self.sent_posts.clear()
                     print("🧹 Cache pulita")
                 
-                # Attendi 15 minuti per la prossima scansione (più frequente per viral news)
+                # Attendi 15 minuti per la prossima scansione
                 print("⏱️ Prossima caccia virale tra 15 minuti...\n")
                 await asyncio.sleep(900)  # 15 minuti
                 
@@ -435,87 +438,20 @@ class ViralNewsHunter:
         if self.reddit:
             await self.reddit.close()
 
-def get_credentials():
-    """Chiede le credenziali all'utente"""
-    print("🔥 CONFIGURAZIONE VIRAL NEWS HUNTER")
-    print("="*50)
-    print("Questo bot trova notizie che stanno diventando VIRALI in tempo reale!")
-    print("🚀 Algoritmo di Viral Score per identificare momentum")
-    print("⚡ Scansione ogni 15 minuti per catturare il trend")
-    print("🎯 Focus su: Breaking news, Tech, Finanza, Bizzarro, Celebrity")
-    print("📊 Analizza: Upvotes/minuto, Commenti, Keywords virali")
-    print("="*50)
-    print()
-    
-    # Reddit credentials
-    print("📘 REDDIT API CREDENTIALS:")
-    print("   1. Vai su: https://www.reddit.com/prefs/apps")
-    print("   2. Crea app tipo 'script'")
-    print("   3. Copia CLIENT ID e CLIENT SECRET")
-    print()
-    
-    reddit_client_id = input("🔹 REDDIT CLIENT ID: ").strip()
-    reddit_client_secret = getpass.getpass("🔹 REDDIT CLIENT SECRET: ").strip()
-    
-    print()
-    
-    # Telegram token
-    print("💬 TELEGRAM BOT TOKEN:")
-    print("   1. @BotFather su Telegram")
-    print("   2. /newbot → nome e username")
-    print("   3. Copia il token")
-    print()
-    
-    telegram_token = getpass.getpass("🔹 TELEGRAM BOT TOKEN: ").strip()
-    
-    print()
-    print("✅ Viral News Hunter configurato! Iniziamo la caccia...")
-    print("="*50)
-    
-    return reddit_client_id, reddit_client_secret, telegram_token
-
-async def test_and_run():
-    """Testa le credenziali e avvia il viral hunter"""
+async def main():
+    """Funzione principale per Render.com"""
     try:
-        # Ottieni credenziali
-        reddit_id, reddit_secret, telegram_token = get_credentials()
+        print("🚀 Avvio Viral News Hunter...")
+        print("📖 Lettura credenziali dalle variabili d'ambiente...")
         
-        # Crea e testa il bot
-        print("🔄 Testing connessioni...")
-        bot = ViralNewsHunter(reddit_id, reddit_secret, telegram_token)
-        
-        # Test rapido Reddit
-        if await bot.initialize():
-            print("🧪 Test caccia notizie virali...")
-            viral_data = await bot.hunt_viral_news()
-            if viral_data and viral_data['viral_posts']:
-                print(f"✅ Test OK! Trovate {len(viral_data['viral_posts'])} notizie virali")
-                # Mostra preview
-                for i, post in enumerate(viral_data['viral_posts'][:3], 1):
-                    print(f"  {i}. {post['category']}: {post['title'][:50]}... (Score: {post['viral_score']})")
-            else:
-                print("⚠️ Reddit OK ma nessuna notizia virale nel test")
-        
-        # Avvia il viral hunter
+        # Crea e avvia il bot
+        bot = ViralNewsHunter()
         await bot.run_viral_hunter()
         
-    except KeyboardInterrupt:
-        print("\n👋 Arrivederci!")
     except Exception as e:
-        print(f"❌ Errore: {e}")
+        print(f"❌ Errore critico: {e}")
+        print("🔧 Controlla le variabili d'ambiente su Render.com")
 
-# Funzione semplice per avviare tutto
-async def start_viral_hunter():
-    """Avvia il viral news hunter (per Jupyter/Colab)"""
-    await test_and_run()
-
+# Avvia il bot quando eseguito direttamente
 if __name__ == "__main__":
-    # Esegui il bot
-    try:
-        asyncio.run(test_and_run())
-    except RuntimeError:
-        print("📱 Per Jupyter/Colab, esegui in una nuova cella:")
-        print("")
-        print("import nest_asyncio")
-        print("nest_asyncio.apply()")
-        print("await start_viral_hunter()")
+    asyncio.run(main())
