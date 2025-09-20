@@ -7,250 +7,347 @@ import logging
 from collections import Counter
 import aiohttp
 import re
-import nest_asyncio
+import threading
+from aiohttp import web
 
-# Apply nest-asyncio per compatibilità con Render
-nest_asyncio.apply()
-
-# Configurazione logging avanzata
+# Configurazione logging per produzione
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('viral_bot.log')
+        logging.FileHandler('bot.log')
     ]
 )
 logger = logging.getLogger(__name__)
 
+class HealthServer:
+    def __init__(self):
+        self.app = web.Application()
+        self.app.router.add_get('/health', self.health_check)
+        self.app.router.add_get('/', self.health_check)
+        self.last_activity = time.time()
+        self.bot_status = "starting"
+        
+    async def health_check(self, request):
+        """Endpoint per health check"""
+        status = {
+            'status': 'healthy',
+            'bot_status': self.bot_status,
+            'timestamp': time.time(),
+            'uptime': time.time() - self.last_activity,
+            'service': 'viral-news-hunter'
+        }
+        return web.json_response(status)
+    
+    def update_status(self, status, activity=True):
+        """Aggiorna lo status del bot"""
+        self.bot_status = status
+        if activity:
+            self.last_activity = time.time()
+    
+    async def start_server(self):
+        """Avvia il server di health check"""
+        port = int(os.getenv('PORT', 8080))
+        runner = web.AppRunner(self.app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Health check server avviato sulla porta {port}")
+
+# Health server globale
+health_server = HealthServer()
+
 class ViralNewsHunter:
     def __init__(self):
-        # Legge le credenziali dalle variabili d'ambiente
-        self.reddit_client_id = os.environ.get('REDDIT_CLIENT_ID')
-        self.reddit_client_secret = os.environ.get('REDDIT_CLIENT_SECRET')
-        self.reddit_username = os.environ.get('REDDIT_USERNAME')
-        self.reddit_password = os.environ.get('REDDIT_PASSWORD')
-        self.telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        self.telegram_chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        # Leggi credenziali dalle variabili d'ambiente
+        self.reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
+        self.reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
+        self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         
-        # Verifica che tutte le variabili siano presenti
-        required_vars = {
-            'REDDIT_CLIENT_ID': self.reddit_client_id,
-            'REDDIT_CLIENT_SECRET': self.reddit_client_secret,
-            'TELEGRAM_BOT_TOKEN': self.telegram_token,
-            'TELEGRAM_CHAT_ID': self.telegram_chat_id
-        }
+        # Verifica che le credenziali esistano
+        if not all([self.reddit_client_id, self.reddit_client_secret, self.telegram_token]):
+            raise ValueError("Variabili d'ambiente mancanti!")
         
-        missing_vars = [k for k, v in required_vars.items() if not v]
-        if missing_vars:
-            raise ValueError(f"❌ Variabili d'ambiente mancanti: {missing_vars}")
-        
-        # Variabili per il tracking
-        self.sent_posts = set()
+        self.active_chats = set()
         self.reddit = None
+        self.sent_posts = set()
         
         # SUBREDDIT per notizie virali
         self.viral_subreddits = [
-            'news', 'worldnews', 'technology', 'science', 'todayilearned',
-            'interestingasfuck', 'nextfuckinglevel', 'gadgets', 'Futurology',
-            'cryptocurrency', 'stocks', 'business', 'economics', 'space',
-            'movies', 'gaming', 'nottheonion', 'offbeat', 'bestof'
+            'news', 'worldnews', 'breakingnews', 'technology', 'gadgets',
+            'Futurology', 'artificial', 'MachineLearning', 'cryptocurrency', 
+            'bitcoin', 'business', 'stocks', 'wallstreetbets', 'todayilearned',
+            'interestingasfuck', 'nextfuckinglevel', 'science', 'space'
         ]
         
         # KEYWORDS virali
         self.viral_indicators = [
-            'breaking', 'urgent', 'record', 'historic', 'unprecedented',
-            'shocking', 'viral', 'trending', 'million', 'billion', 
-            'elon musk', 'ai', 'chatgpt', 'tesla', 'bitcoin', 'crisis'
+            'breaking', 'urgent', 'developing', 'record', 'highest', 'lowest',
+            'shocking', 'unbelievable', 'viral', 'trending', 'million', 'billion',
+            'elon musk', 'ai', 'chatgpt', 'tesla', 'unprecedented', 'historic'
         ]
-
-    async def initialize_reddit(self):
-        """Inizializza la connessione Reddit"""
+        
+    async def initialize(self):
+        """Inizializza le connessioni"""
         try:
             self.reddit = asyncpraw.Reddit(
                 client_id=self.reddit_client_id,
                 client_secret=self.reddit_client_secret,
-                username=self.reddit_username,
-                password=self.reddit_password,
-                user_agent='ViralNewsBot/1.0 (by /u/your_username)'
+                user_agent='ViralNewsHunter/2.0'
             )
-            logger.info("✅ Connessione Reddit inizializzata")
+            health_server.update_status("reddit_connected")
+            logger.info("✅ Reddit connesso")
             return True
         except Exception as e:
-            logger.error(f"❌ Errore inizializzazione Reddit: {e}")
+            health_server.update_status("reddit_error")
+            logger.error(f"❌ Errore Reddit: {e}")
             return False
-
-    def calculate_viral_score(self, post, minutes_ago):
-        """Calcola il punteggio virale di un post"""
-        if minutes_ago <= 0:
-            return 0
-            
+    
+    async def get_active_chats(self):
+        """Rileva chat attive"""
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data['ok'] and data['result']:
+                            for update in data['result']:
+                                if 'message' in update:
+                                    chat_id = update['message']['chat']['id']
+                                    if chat_id not in self.active_chats:
+                                        self.active_chats.add(chat_id)
+                                        logger.info(f"Nuova chat: {chat_id}")
+                            
+                            if data['result']:
+                                last_id = data['result'][-1]['update_id']
+                                clear_url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates?offset={last_id + 1}"
+                                await session.get(clear_url)
+                        return True
+                    return False
+        except Exception as e:
+            logger.error(f"Errore chat detection: {e}")
+            return False
+    
+    def calculate_viral_score(self, post, subreddit, minutes_ago):
+        """Calcola viral score"""
         score = 0
         title_lower = post.title.lower()
         
-        # Punteggio base da upvotes e velocità
-        upvotes_per_minute = post.score / minutes_ago
-        score += min(upvotes_per_minute * 5, 100)
+        # Velocità upvotes
+        if minutes_ago > 0:
+            upvotes_per_minute = post.score / minutes_ago
+            score += min(upvotes_per_minute * 2, 100)
         
-        # Bonus per engagement
-        if post.num_comments > 0:
-            comment_ratio = post.num_comments / minutes_ago
-            score += min(comment_ratio * 3, 50)
+        # Upvotes assoluti
+        if post.score > 1000:
+            score += 50
+        elif post.score > 500:
+            score += 30
+        elif post.score > 100:
+            score += 15
         
-        # Bonus per keywords virali
+        # Commenti
+        if post.num_comments > 500:
+            score += 40
+        elif post.num_comments > 200:
+            score += 25
+        elif post.num_comments > 50:
+            score += 10
+        
+        # Keywords virali
         for keyword in self.viral_indicators:
             if keyword in title_lower:
-                score += 20
+                score += 25
+        
+        # Numeri nel titolo
+        numbers = re.findall(r'\d+[%$]?', title_lower)
+        score += len(numbers) * 10
         
         return int(score)
-
-    async def get_viral_posts(self):
-        """Cerca post virali across tutti i subreddit"""
-        viral_posts = []
-        current_time = datetime.now()
+    
+    def categorize_viral_post(self, title, subreddit):
+        """Categorizza post"""
+        title_lower = title.lower()
         
-        for subreddit_name in self.viral_subreddits:
-            try:
-                subreddit = await self.reddit.subreddit(subreddit_name)
-                async for post in subreddit.new(limit=20):
-                    post_time = datetime.fromtimestamp(post.created_utc)
-                    minutes_ago = (current_time - post_time).total_seconds() / 60
-                    
-                    # Considera solo post delle ultime 2 ore
-                    if minutes_ago <= 120:
-                        viral_score = self.calculate_viral_score(post, minutes_ago)
-                        
-                        if viral_score >= 40 and post.id not in self.sent_posts:
-                            viral_posts.append({
-                                'id': post.id,
-                                'title': post.title,
-                                'score': post.score,
-                                'subreddit': subreddit_name,
-                                'url': f"https://reddit.com{post.permalink}",
-                                'comments': post.num_comments,
-                                'viral_score': viral_score,
-                                'minutes_ago': int(minutes_ago)
-                            })
-                            
-            except Exception as e:
-                logger.warning(f"Errore in subreddit {subreddit_name}: {e}")
-                continue
-        
-        # Ordina per viral score
-        viral_posts.sort(key=lambda x: x['viral_score'], reverse=True)
-        return viral_posts[:5]  # Top 5
-
-    async def send_telegram_message(self, message):
-        """Invia messaggio a Telegram"""
+        if 'elon' in title_lower or 'tesla' in title_lower:
+            return '🚗 ELON/TESLA'
+        elif any(word in title_lower for word in ['ai', 'chatgpt', 'robot']):
+            return '🤖 AI/TECH'
+        elif any(word in title_lower for word in ['bitcoin', 'crypto', 'stock']):
+            return '💰 FINANZA'
+        elif any(word in title_lower for word in ['breaking', 'urgent']):
+            return '🚨 BREAKING'
+        elif subreddit == 'todayilearned':
+            return '📚 TIL'
+        else:
+            return '🔥 VIRALE'
+    
+    async def hunt_viral_news(self):
+        """Caccia notizie virali"""
         try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            payload = {
-                'chat_id': self.telegram_chat_id,
-                'text': message,
-                'parse_mode': 'HTML',
-                'disable_web_page_preview': False
-            }
+            viral_posts = []
+            current_time = datetime.now()
+            health_server.update_status("scanning")
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as response:
-                    if response.status == 200:
-                        logger.info("✅ Messaggio inviato a Telegram")
-                        return True
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"❌ Errore Telegram: {response.status} - {error_text}")
-                        return False
+            for subreddit_name in self.viral_subreddits:
+                try:
+                    subreddit = await self.reddit.subreddit(subreddit_name)
+                    count = 0
+                    async for post in subreddit.hot(limit=20):
+                        count += 1
+                        post_time = datetime.fromtimestamp(post.created_utc)
+                        minutes_ago = (current_time - post_time).total_seconds() / 60
                         
+                        if minutes_ago <= 360:  # 6 ore
+                            viral_score = self.calculate_viral_score(post, subreddit_name, minutes_ago)
+                            
+                            if viral_score >= 60 and post.id not in self.sent_posts:
+                                viral_posts.append({
+                                    'id': post.id,
+                                    'title': post.title,
+                                    'score': post.score,
+                                    'subreddit': subreddit_name,
+                                    'url': f"https://reddit.com{post.permalink}",
+                                    'comments': post.num_comments,
+                                    'viral_score': viral_score,
+                                    'minutes_ago': round(minutes_ago),
+                                    'category': self.categorize_viral_post(post.title, subreddit_name),
+                                    'upvotes_per_min': round(post.score / max(minutes_ago, 1), 1)
+                                })
+                        if count >= 20:
+                            break
+                except Exception as e:
+                    logger.warning(f"Errore subreddit {subreddit_name}: {e}")
+                    continue
+            
+            viral_posts.sort(key=lambda x: x['viral_score'], reverse=True)
+            health_server.update_status("scan_complete")
+            logger.info(f"Trovati {len(viral_posts)} post virali")
+            
+            return {
+                'viral_posts': viral_posts[:6],
+                'timestamp': current_time
+            }
         except Exception as e:
-            logger.error(f"❌ Errore invio Telegram: {e}")
-            return False
-
-    def format_message(self, posts):
-        """Formatta il messaggio per Telegram"""
-        if not posts:
-            return "🔍 Nessuna notizia virale trovata nell'ultima ora."
+            health_server.update_status("scan_error")
+            logger.error(f"Errore caccia: {e}")
+            return None
+    
+    def format_viral_message(self, data):
+        """Formatta messaggio"""
+        if not data or not data['viral_posts']:
+            return "❌ Nessuna notizia virale al momento."
         
-        message = "🔥 <b>NOTIZIE VIRALI IN TEMPO REALE</b> 🔥\n\n"
+        timestamp = data['timestamp'].strftime("%H:%M - %d/%m/%Y")
+        message = f"🔥 NOTIZIE VIRALI DELL'ULTIMA ORA 🔥\n⏰ {timestamp}\n\n"
         
-        for i, post in enumerate(posts, 1):
-            message += f"📈 <b>Notizia #{i}</b>\n"
-            message += f"📝 {post['title']}\n"
-            message += f"🚀 Viral Score: {post['viral_score']}\n"
-            message += f"👍 Upvotes: {post['score']} | 💬 Commenti: {post['comments']}\n"
-            message += f"📍 Subreddit: r/{post['subreddit']}\n"
-            message += f"⏰ {post['minutes_ago']} minuti fa\n"
+        for i, post in enumerate(data['viral_posts'], 1):
+            title = post['title'][:70] + "..." if len(post['title']) > 70 else post['title']
+            title = title.replace('[', '').replace(']', '').replace('*', '')
+            
+            message += f"{post['category']} {i}. {title}\n"
+            message += f"🚀 Score: {post['viral_score']} | 👍 {post['score']} ({post['upvotes_per_min']}/min)\n"
+            message += f"💬 {post['comments']} | r/{post['subreddit']} | {post['minutes_ago']}min\n"
             message += f"🔗 {post['url']}\n\n"
         
-        message += f"⏰ Ultimo aggiornamento: {datetime.now().strftime('%H:%M:%S')}"
         return message
-
-    async def run_scan(self):
-        """Esegue una singola scansione"""
-        try:
-            logger.info("🔍 Inizio scansione notizie virali...")
-            
-            posts = await self.get_viral_posts()
-            if posts:
-                message = self.format_message(posts)
-                success = await self.send_telegram_message(message)
-                
-                if success:
-                    # Aggiungi i post inviati alla blacklist
-                    for post in posts:
-                        self.sent_posts.add(post['id'])
+    
+    async def send_to_telegram(self, message):
+        """Invia a Telegram"""
+        if not self.active_chats:
+            return False
+        
+        success_count = 0
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            for chat_id in self.active_chats.copy():
+                try:
+                    url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+                    payload = {
+                        'chat_id': chat_id,
+                        'text': message,
+                        'disable_web_page_preview': True
+                    }
                     
-                    logger.info(f"✅ Inviati {len(posts)} post virali")
-                else:
-                    logger.warning("❌ Fallito invio messaggio Telegram")
-            else:
-                logger.info("⚠️ Nessun post virale trovato")
-                
-        except Exception as e:
-            logger.error(f"❌ Errore durante la scansione: {e}")
-
-    async def main_loop(self):
-        """Loop principale del bot"""
-        # Inizializza Reddit
-        if not await self.initialize_reddit():
+                    async with session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            success_count += 1
+                        elif response.status in [400, 403, 404]:
+                            self.active_chats.discard(chat_id)
+                except Exception as e:
+                    logger.error(f"Errore invio {chat_id}: {e}")
+        
+        return success_count > 0
+    
+    async def run_viral_hunter(self):
+        """Main loop"""
+        logger.info("🚀 Avvio Viral News Hunter...")
+        
+        if not await self.initialize():
+            health_server.update_status("init_failed")
             return
         
-        logger.info("🚀 Viral News Bot avviato correttamente!")
-        logger.info(f"📊 Monitoraggio {len(self.viral_subreddits)} subreddit")
-        logger.info("⏰ Scansione ogni 15 minuti...")
+        health_server.update_status("running")
+        logger.info("✅ Bot avviato!")
         
-        # Loop infinito
         while True:
             try:
-                await self.run_scan()
-                logger.info("⏳ Prossima scansione tra 15 minuti...")
+                await self.get_active_chats()
+                
+                viral_data = await self.hunt_viral_news()
+                
+                if viral_data and viral_data['viral_posts']:
+                    new_viral = [p for p in viral_data['viral_posts'] if p['id'] not in self.sent_posts]
+                    
+                    if new_viral and self.active_chats:
+                        for post in new_viral:
+                            self.sent_posts.add(post['id'])
+                        
+                        viral_data['viral_posts'] = new_viral
+                        message = self.format_viral_message(viral_data)
+                        success = await self.send_to_telegram(message)
+                        
+                        if success:
+                            health_server.update_status("message_sent")
+                            logger.info(f"🔥 Inviate {len(new_viral)} notizie a {len(self.active_chats)} chat!")
+                    elif not self.active_chats:
+                        health_server.update_status("no_chats")
+                        logger.info("⏳ Nessuna chat attiva")
+                else:
+                    health_server.update_status("no_viral_news")
+                
+                # Pulizia cache
+                if len(self.sent_posts) > 1000:
+                    self.sent_posts.clear()
+                
+                health_server.update_status("waiting")
                 await asyncio.sleep(900)  # 15 minuti
                 
-            except asyncio.CancelledError:
-                break
             except Exception as e:
-                logger.error(f"❌ Errore nel main loop: {e}")
-                await asyncio.sleep(300)  # Aspetta 5 minuti prima di riprovare
+                health_server.update_status("error")
+                logger.error(f"Errore main loop: {e}")
+                await asyncio.sleep(180)
         
-        # Cleanup
         if self.reddit:
             await self.reddit.close()
-        logger.info("🛑 Bot fermato")
 
-async def run_bot():
-    """Funzione di avvio per Render"""
-    bot = ViralNewsHunter()
-    await bot.main_loop()
+async def run_health_server():
+    """Avvia health server"""
+    await health_server.start_server()
 
-# Avvio sicuro per Render
-if __name__ == "__main__":
-    logger.info("🎯 Avvio Viral News Bot...")
+async def main():
+    """Main con health server"""
+    # Avvia health server in background
+    asyncio.create_task(run_health_server())
     
     try:
-        # Loop principale con gestione errori
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot fermato manualmente")
+        bot = ViralNewsHunter()
+        await bot.run_viral_hunter()
     except Exception as e:
-        logger.error(f"💥 Errore critico: {e}")
-    finally:
-        logger.info("👋 Uscita dal bot")
+        logger.error(f"Errore critico: {e}")
+        health_server.update_status("critical_error")
+        await asyncio.sleep(60)
+
+if __name__ == "__main__":
+    asyncio.run(main())
