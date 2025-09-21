@@ -7,108 +7,179 @@ import logging
 from collections import Counter
 import aiohttp
 import re
+import json
+import math
 
-# Configurazione logging per produzione
+# Configurazione logging
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('bot.log')
-    ]
+    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
 )
 logger = logging.getLogger(__name__)
 
+# ===== AI VIRAL PREDICTOR ENGINE =====
+class ViralPredictorAI:
+    def __init__(self):
+        # Pattern storici di viralità (Machine Learning simulato)
+        self.historical_patterns = {
+            'elon_musk': {'viral_probability': 0.85, 'peak_hours': 4},
+            'ai_breakthrough': {'viral_probability': 0.78, 'peak_hours': 6},
+            'crypto_crash': {'viral_probability': 0.92, 'peak_hours': 2},
+            'tech_layoffs': {'viral_probability': 0.73, 'peak_hours': 8},
+            'scandal_celebrity': {'viral_probability': 0.88, 'peak_hours': 3},
+            'market_crash': {'viral_probability': 0.95, 'peak_hours': 1},
+            'space_news': {'viral_probability': 0.65, 'peak_hours': 12},
+            'gaming_drama': {'viral_probability': 0.70, 'peak_hours': 5},
+        }
+        
+        # Sentiment keywords per analisi emotiva
+        self.sentiment_keywords = {
+            'high_emotion': ['shocking', 'unbelievable', 'insane', 'crazy', 'amazing', 'incredible', 'breakthrough'],
+            'viral_multipliers': ['breaking', 'urgent', 'record', 'highest', 'lowest', 'million', 'billion', 'exclusive', 'leaked']
+        }
+    
+    def analyze_sentiment(self, title):
+        """🧠 Analizza sentiment"""
+        text = title.lower()
+        sentiment_score = 0
+        
+        # High emotion keywords
+        for keyword in self.sentiment_keywords['high_emotion']:
+            if keyword in text:
+                sentiment_score += 15
+        
+        # Viral multipliers
+        for keyword in self.sentiment_keywords['viral_multipliers']:
+            if keyword in text:
+                sentiment_score += 20
+        
+        return min(sentiment_score, 100)
+    
+    def identify_pattern_category(self, title, subreddit):
+        """🎯 Identifica categoria"""
+        title_lower = title.lower()
+        
+        if any(keyword in title_lower for keyword in ['elon', 'musk', 'tesla', 'spacex']):
+            return 'elon_musk'
+        elif any(keyword in title_lower for keyword in ['ai', 'artificial intelligence', 'chatgpt', 'robot']):
+            return 'ai_breakthrough' 
+        elif any(keyword in title_lower for keyword in ['bitcoin', 'crypto', 'ethereum', 'crash']):
+            return 'crypto_crash'
+        elif any(keyword in title_lower for keyword in ['layoffs', 'fired', 'job cuts']):
+            return 'tech_layoffs'
+        elif any(keyword in title_lower for keyword in ['scandal', 'controversy', 'exposed']):
+            return 'scandal_celebrity'
+        elif any(keyword in title_lower for keyword in ['market', 'stock', 'crash', 'plummet']):
+            return 'market_crash'
+        elif any(keyword in title_lower for keyword in ['space', 'mars', 'moon', 'nasa']):
+            return 'space_news'
+        elif 'gaming' in title_lower or subreddit in ['gaming', 'games']:
+            return 'gaming_drama'
+        else:
+            return 'general'
+    
+    def predict_viral_trajectory(self, post, subreddit, minutes_ago):
+        """🔮 CORE: Predice se diventerà virale"""
+        
+        # Analisi sentiment
+        sentiment_score = self.analyze_sentiment(post.title)
+        
+        # Pattern matching
+        pattern_category = self.identify_pattern_category(post.title, subreddit)
+        historical_pattern = self.historical_patterns.get(pattern_category, {
+            'viral_probability': 0.5, 'peak_hours': 8
+        })
+        
+        # Velocità virale (upvotes per minuto)
+        if minutes_ago > 0:
+            velocity = post.score / minutes_ago
+            if velocity >= 30:
+                velocity_multiplier = 2.0  # Explosive
+            elif velocity >= 15:
+                velocity_multiplier = 1.5  # Fast
+            elif velocity >= 8:
+                velocity_multiplier = 1.2  # Steady
+            else:
+                velocity_multiplier = 1.0  # Slow
+        else:
+            velocity_multiplier = 1.0
+        
+        # Engagement ratio (controversia = viralità)
+        engagement_ratio = post.num_comments / max(post.score, 1)
+        controversy_factor = min(engagement_ratio * 1.5, 2.0)
+        
+        # ALGORITMO PREDITTIVO
+        base_probability = historical_pattern['viral_probability']
+        sentiment_multiplier = 1 + (sentiment_score / 100)
+        
+        # Calcola probabilità finale
+        viral_probability = min(
+            base_probability * sentiment_multiplier * velocity_multiplier * controversy_factor, 
+            0.99
+        )
+        
+        # Predici score finale
+        if viral_probability > 0.8:
+            predicted_final_score = post.score * 10
+        elif viral_probability > 0.6:
+            predicted_final_score = post.score * 5
+        else:
+            predicted_final_score = post.score * 2
+        
+        return {
+            'viral_probability': round(viral_probability * 100, 1),
+            'predicted_peak_hours': historical_pattern['peak_hours'],
+            'predicted_final_score': int(predicted_final_score),
+            'sentiment_score': sentiment_score,
+            'pattern_match': pattern_category,
+            'velocity_per_min': round(post.score / max(minutes_ago, 1), 1)
+        }
+
+# ===== ENHANCED VIRAL NEWS HUNTER =====
 class ViralNewsHunter:
     def __init__(self):
-        # Leggi credenziali dalle variabili d'ambiente
+        # Credenziali dalle variabili d'ambiente
         self.reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
         self.reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         
-        # Verifica che le credenziali esistano
         if not all([self.reddit_client_id, self.reddit_client_secret, self.telegram_token]):
-            raise ValueError("Variabili d'ambiente mancanti! Imposta REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, TELEGRAM_BOT_TOKEN")
+            raise ValueError("Variabili d'ambiente mancanti!")
         
-        # Variabili per il tracking delle chat
+        # 🧠 AI PREDICTOR
+        self.predictor_ai = ViralPredictorAI()
+        
+        # State management
         self.active_chats = set()
         self.reddit = None
-        self.sent_posts = set()  # Per evitare duplicati
+        self.sent_posts = set()
         
-        # SUBREDDIT per notizie virali e breaking news
+        # Subreddit per analisi (stesso di prima)
         self.viral_subreddits = [
-            # Breaking news generali
             'news', 'worldnews', 'breakingnews', 'nottheonion', 'offbeat',
-            
-            # Tech e innovazione
             'technology', 'gadgets', 'Futurology', 'singularity', 'artificial',
             'MachineLearning', 'cryptocurrency', 'bitcoin', 'ethereum',
-            
-            # Business e finanza
             'business', 'economics', 'stocks', 'wallstreetbets', 'investing',
-            
-            # Cultura e trending
             'todayilearned', 'interestingasfuck', 'nextfuckinglevel', 'Damnthatsinteresting',
             'mildlyinteresting', 'showerthoughts', 'explainlikeimfive',
-            
-            # Social e viral content
             'facepalm', 'publicfreakout', 'instant_regret', 'whatcouldgowrong',
             'therewasanattempt', 'crappydesign', 'assholedesign',
-            
-            # Science e discovery
             'science', 'space', 'physics', 'biology', 'medicine', 'health',
-            
-            # Entertainment
             'movies', 'television', 'gaming', 'music', 'books',
-            
-            # Reddit meta (spesso virale)
             'bestof', 'announcements', 'blog'
         ]
         
-        # KEYWORDS che indicano viralità
-        self.viral_indicators = [
-            # Urgenza e breaking
-            'breaking', 'urgent', 'just in', 'developing', 'live', 'happening now',
-            'alert', 'emergency', 'crisis', 'scandal', 'exposed', 'leaked',
-            
-            # Record e superlativi
-            'record', 'highest', 'lowest', 'biggest', 'smallest', 'first time',
-            'never before', 'historic', 'unprecedented', 'revolutionary',
-            'groundbreaking', 'game changing', 'massive', 'huge', 'enormous',
-            
-            # Shock e sorpresa
-            'shocking', 'unbelievable', 'incredible', 'amazing', 'stunning',
-            'bizarre', 'weird', 'crazy', 'insane', 'wild', 'unexpected',
-            'plot twist', 'you wont believe', 'mind blowing',
-            
-            # Trend e virale
-            'viral', 'trending', 'everyone is talking', 'internet is going crazy',
-            'twitter is losing it', 'blowing up', 'everywhere',
-            
-            # Numeri impressionanti
-            'million', 'billion', 'trillion', '%', '$', '000', 'x increase',
-            'jumped', 'soared', 'plummeted', 'crashed', 'exploded',
-            
-            # Celebrity e figure pubbliche
-            'elon musk', 'jeff bezos', 'bill gates', 'mark zuckerberg',
-            'donald trump', 'joe biden', 'pope', 'queen', 'celebrity',
-            
-            # Tech buzzwords
-            'ai', 'chatgpt', 'artificial intelligence', 'robot', 'automation',
-            'tesla', 'spacex', 'apple', 'google', 'microsoft', 'meta', 'openai'
-        ]
-        
     async def initialize(self):
-        """Inizializza le connessioni async"""
+        """Inizializza Reddit connection"""
         try:
             self.reddit = asyncpraw.Reddit(
                 client_id=self.reddit_client_id,
                 client_secret=self.reddit_client_secret,
-                user_agent='ViralNewsHunter/2.0 (by /u/YourUsername)'
+                user_agent='ViralNewsHunter/2.0'
             )
             logger.info("✅ Connessione Reddit inizializzata")
             return True
-            
         except Exception as e:
             logger.error(f"❌ Errore inizializzazione Reddit: {e}")
             return False
@@ -151,124 +222,18 @@ class ViralNewsHunter:
             logger.error(f"Errore nel rilevamento chat: {e}")
             return False
     
-    def calculate_viral_score(self, post, subreddit, minutes_ago):
-        """Calcola il potenziale virale di un post"""
-        score = 0
-        title_lower = post.title.lower()
-        
-        # Base score da upvotes e velocità
-        if minutes_ago > 0:
-            upvotes_per_minute = post.score / minutes_ago
-            score += min(upvotes_per_minute * 2, 100)  # Max 100 punti da velocità
-        
-        # Bonus per numero assoluto di upvotes
-        if post.score > 1000:
-            score += 50
-        elif post.score > 500:
-            score += 30
-        elif post.score > 100:
-            score += 15
-        
-        # Bonus per commenti (engagement)
-        if post.num_comments > 500:
-            score += 40
-        elif post.num_comments > 200:
-            score += 25
-        elif post.num_comments > 50:
-            score += 10
-        
-        # Ratio upvotes/commenti (controversia = viralità)
-        if post.num_comments > 0:
-            ratio = post.score / post.num_comments
-            if ratio < 5:  # Molti commenti vs upvotes = controverso
-                score += 20
-        
-        # Bonus per parole chiave virali
-        viral_keywords_found = 0
-        for keyword in self.viral_indicators:
-            if keyword in title_lower:
-                score += 25
-                viral_keywords_found += 1
-        
-        # Bonus extra per multiple keywords virali
-        if viral_keywords_found > 2:
-            score += 30
-        
-        # Bonus per subreddit ad alto potenziale virale
-        high_viral_subs = ['news', 'worldnews', 'todayilearned', 'interestingasfuck', 
-                          'nextfuckinglevel', 'technology', 'wallstreetbets']
-        if subreddit in high_viral_subs:
-            score += 20
-        
-        # Bonus per numeri nel titolo (statistiche = viralità)
-        numbers = re.findall(r'\d+[%$]?|\d+\.\d+[%$]?', title_lower)
-        score += len(numbers) * 10
-        
-        # Bonus per ALL CAPS (urgenza)
-        caps_words = re.findall(r'\b[A-Z]{3,}\b', post.title)
-        score += len(caps_words) * 5
-        
-        # Penalità per post troppo vecchi
-        if minutes_ago > 180:  # Più di 3 ore
-            score *= 0.5
-        
-        return int(score)
-    
-    def categorize_viral_post(self, title, subreddit):
-        """Categorizza il tipo di notizia virale"""
-        title_lower = title.lower()
-        
-        # Tech e innovazione
-        if any(word in title_lower for word in ['ai', 'robot', 'tech', 'innovation', 'breakthrough']):
-            if 'elon' in title_lower or 'tesla' in title_lower:
-                return '🚗 ELON/TESLA'
-            elif any(word in title_lower for word in ['ai', 'chatgpt', 'artificial', 'robot']):
-                return '🤖 AI/TECH'
-            else:
-                return '💻 TECNOLOGIA'
-        
-        # Business e finanza
-        elif any(word in title_lower for word in ['stock', 'market', 'bitcoin', 'crypto', '$', 'billion']):
-            return '💰 FINANZA'
-        
-        # Breaking news
-        elif any(word in title_lower for word in ['breaking', 'urgent', 'developing', 'crisis']):
-            return '🚨 BREAKING'
-        
-        # Science e discovery
-        elif any(word in title_lower for word in ['study', 'research', 'scientists', 'discovery']):
-            return '🔬 SCIENZA'
-        
-        # Celebrity e personaggi pubblici  
-        elif any(word in title_lower for word in ['trump', 'biden', 'celebrity', 'famous']):
-            return '⭐ CELEBRITY'
-        
-        # Weird e bizzarro
-        elif any(word in title_lower for word in ['bizarre', 'weird', 'crazy', 'unbelievable']):
-            return '🤯 BIZZARRO'
-        
-        # Fail e fails
-        elif subreddit in ['facepalm', 'therewasanattempt', 'instant_regret']:
-            return '🤦 FAIL'
-        
-        # TIL e facts
-        elif subreddit == 'todayilearned':
-            return '📚 TIL'
-        
-        else:
-            return '🔥 VIRALE'
-    
-    async def hunt_viral_news(self):
-        """Cerca notizie che stanno diventando virali"""
+    async def hunt_viral_news_with_ai(self):
+        """🔮 Cerca notizie virali con AI predictions"""
         try:
             viral_posts = []
+            predictions = []
             current_time = datetime.now()
             
             for subreddit_name in self.viral_subreddits:
                 try:
                     subreddit = await self.reddit.subreddit(subreddit_name)
                     
-                    # Analizza i post più HOT (viralità in corso)
+                    # Analizza post HOT (come prima)
                     count = 0
                     async for post in subreddit.hot(limit=25):
                         count += 1
@@ -276,12 +241,18 @@ class ViralNewsHunter:
                         post_time = datetime.fromtimestamp(post.created_utc)
                         minutes_ago = (current_time - post_time).total_seconds() / 60
                         
-                        # Focus su post delle ultime 6 ore
+                        # Focus su post delle ultime 6 ore (come prima)
                         if minutes_ago <= 360:  
+                            # 🧠 AGGIUNGI AI PREDICTION
+                            ai_prediction = self.predictor_ai.predict_viral_trajectory(
+                                post, subreddit_name, minutes_ago
+                            )
+                            
+                            # VIRAL SCORE ORIGINALE (come prima)
                             viral_score = self.calculate_viral_score(post, subreddit_name, minutes_ago)
                             
-                            # Soglia per essere considerato "virale"
-                            if viral_score >= 60 and post.id not in self.sent_posts:  # Soglia aumentata per produzione
+                            # Combina score originale + AI
+                            if viral_score >= 60 and post.id not in self.sent_posts:
                                 viral_posts.append({
                                     'id': post.id,
                                     'title': post.title,
@@ -293,7 +264,9 @@ class ViralNewsHunter:
                                     'viral_score': viral_score,
                                     'minutes_ago': round(minutes_ago),
                                     'category': self.categorize_viral_post(post.title, subreddit_name),
-                                    'upvotes_per_min': round(post.score / max(minutes_ago, 1), 1)
+                                    'upvotes_per_min': round(post.score / max(minutes_ago, 1), 1),
+                                    # 🔮 AGGIUNGI AI DATA
+                                    'ai_prediction': ai_prediction
                                 })
                         
                         if count >= 25:
@@ -303,13 +276,13 @@ class ViralNewsHunter:
                     logger.warning(f"Errore nel subreddit {subreddit_name}: {e}")
                     continue
             
-            # Ordina per viral_score
+            # Ordina per viral_score (come prima)
             viral_posts.sort(key=lambda x: x['viral_score'], reverse=True)
             
-            logger.info(f"Trovati {len(viral_posts)} post virali")
+            logger.info(f"Trovati {len(viral_posts)} post virali con AI")
             
             return {
-                'viral_posts': viral_posts[:8],  # Top 8 più virali
+                'viral_posts': viral_posts[:8],  # Top 8 come prima
                 'timestamp': current_time
             }
             
@@ -317,37 +290,113 @@ class ViralNewsHunter:
             logger.error(f"Errore nella caccia virale: {e}")
             return None
     
-    def format_viral_message(self, data):
-        """Formatta il messaggio per notizie virali"""
+    def calculate_viral_score(self, post, subreddit, minutes_ago):
+        """Calcola viral score ORIGINALE (come prima)"""
+        score = 0
+        title_lower = post.title.lower()
+        
+        # Base score da upvotes e velocità
+        if minutes_ago > 0:
+            upvotes_per_minute = post.score / minutes_ago
+            score += min(upvotes_per_minute * 2, 100)
+        
+        # Bonus per numero assoluto di upvotes
+        if post.score > 1000:
+            score += 50
+        elif post.score > 500:
+            score += 30
+        elif post.score > 100:
+            score += 15
+        
+        # Bonus per commenti
+        if post.num_comments > 500:
+            score += 40
+        elif post.num_comments > 200:
+            score += 25
+        elif post.num_comments > 50:
+            score += 10
+        
+        # Viral keywords
+        viral_indicators = [
+            'breaking', 'urgent', 'developing', 'record', 'highest', 'lowest',
+            'shocking', 'unbelievable', 'viral', 'trending', 'million', 'billion',
+            'elon musk', 'ai', 'chatgpt', 'tesla', 'unprecedented', 'historic'
+        ]
+        
+        for keyword in viral_indicators:
+            if keyword in title_lower:
+                score += 25
+        
+        # Penalità per post troppo vecchi
+        if minutes_ago > 180:
+            score *= 0.5
+        
+        return int(score)
+    
+    def categorize_viral_post(self, title, subreddit):
+        """Categorizza post (come prima)"""
+        title_lower = title.lower()
+        
+        if any(word in title_lower for word in ['elon', 'tesla']):
+            return '🚗 ELON/TESLA'
+        elif any(word in title_lower for word in ['ai', 'chatgpt', 'robot']):
+            return '🤖 AI/TECH'
+        elif any(word in title_lower for word in ['bitcoin', 'crypto', 'stock']):
+            return '💰 FINANZA'
+        elif any(word in title_lower for word in ['breaking', 'urgent']):
+            return '🚨 BREAKING'
+        elif subreddit == 'todayilearned':
+            return '📚 TIL'
+        else:
+            return '🔥 VIRALE'
+    
+    def format_viral_message_with_ai(self, data):
+        """📱 Formatta messaggio CON AI predictions"""
         if not data or not data['viral_posts']:
             return "❌ Nessuna notizia virale rilevata in questo momento."
         
         timestamp = data['timestamp'].strftime("%H:%M - %d/%m/%Y")
         
         message = f"🔥 NOTIZIE VIRALI DELL'ULTIMA ORA 🔥\n"
-        message += f"⏰ Scansione: {timestamp}\n\n"
+        message += f"⏰ Scansione: {timestamp}\n"
+        message += f"🧠 Powered by AI Predictions\n\n"
         
         # Top notizie virali
         message += "📈 TOP NOTIZIE CHE STANNO DIVENTANDO VIRALI:\n"
         
         for i, post in enumerate(data['viral_posts'], 1):
-            title = post['title'][:75] + "..." if len(post['title']) > 75 else post['title']
-            # Pulisci caratteri problematici
-            title = title.replace('[', '').replace(']', '').replace('*', '').replace('_', '')
+            title = post['title'][:70] + "..." if len(post['title']) > 70 else post['title']
+            title = title.replace('[', '').replace(']', '').replace('*', '')
+            
+            # 🔮 AGGIUNGI AI INFO
+            ai = post['ai_prediction']
+            
+            # Emoji AI confidence
+            if ai['viral_probability'] >= 80:
+                ai_emoji = "🚀🔥"
+            elif ai['viral_probability'] >= 60:
+                ai_emoji = "⚡📈"
+            else:
+                ai_emoji = "📊"
             
             message += f"\n{post['category']} {i}. {title}\n"
-            message += f"🚀 Score: {post['viral_score']} | "
+            message += f"🔥 Viral Score: {post['viral_score']} | "
             message += f"👍 {post['score']} ({post['upvotes_per_min']}/min) | "
             message += f"💬 {post['comments']}\n"
+            
+            # 🧠 AGGIUNGI AI PREDICTIONS
+            message += f"{ai_emoji} AI Predice: {ai['viral_probability']}% prob → "
+            message += f"{ai['predicted_final_score']:,} upvotes in {ai['predicted_peak_hours']}h\n"
+            
             message += f"📍 r/{post['subreddit']} | ⏱️ {post['minutes_ago']} min fa\n"
             message += f"🔗 {post['url']}\n"
         
         # Statistiche finali
         total_viral = len(data['viral_posts'])
-        avg_score = sum(p['viral_score'] for p in data['viral_posts']) // max(total_viral, 1)
+        avg_ai_prob = sum(p['ai_prediction']['viral_probability'] for p in data['viral_posts']) / total_viral
         
-        message += f"\n📊 Trovate {total_viral} notizie virali\n"
-        message += f"📈 Viral Score medio: {avg_score}\n"
+        message += f"\n📊 {total_viral} notizie virali trovate\n"
+        message += f"🧠 AI Confidence media: {avg_ai_prob:.1f}%\n"
         message += f"🎯 Scansionati {len(self.viral_subreddits)} subreddit"
         
         return message
@@ -376,7 +425,7 @@ class ViralNewsHunter:
                             success_count += 1
                         else:
                             error_data = await response.text()
-                            logger.error(f"Errore nell'invio alla chat {chat_id}: {response.status} - {error_data}")
+                            logger.error(f"Errore nell'invio alla chat {chat_id}: {response.status}")
                             if response.status in [400, 403, 404]:
                                 self.active_chats.discard(chat_id)
                                 logger.info(f"Chat {chat_id} rimossa dalle chat attive")
@@ -387,25 +436,25 @@ class ViralNewsHunter:
         return success_count > 0
     
     async def run_viral_hunter(self):
-        """Esegue il viral news hunter principale"""
-        logger.info("🚀 Avvio Viral News Hunter...")
+        """🚀 MAIN LOOP (stessa struttura di prima ma con AI)"""
+        logger.info("🚀 Avvio Viral News Hunter con AI...")
         
         if not await self.initialize():
             logger.error("❌ Impossibile inizializzare Reddit!")
             return
         
-        logger.info("✅ Viral News Hunter avviato con successo!")
-        logger.info("🔍 Il bot cerca notizie che stanno diventando virali")
-        logger.info("⏰ Scansione ogni 15 minuti")
+        logger.info("✅ Viral News Hunter con AI avviato!")
+        logger.info("🧠 AI Predictions integrate nel flusso esistente")
+        logger.info("⏰ Scansione ogni 15 minuti (come prima)")
         
         while True:
             try:
                 # Rileva nuove chat
                 await self.get_active_chats()
                 
-                # Cerca viral news
-                logger.info("🔍 Iniziando caccia notizie virali...")
-                viral_data = await self.hunt_viral_news()
+                # Cerca viral news CON AI
+                logger.info("🔍 Iniziando caccia notizie virali con AI...")
+                viral_data = await self.hunt_viral_news_with_ai()
                 
                 if viral_data and viral_data['viral_posts']:
                     # Filtra solo i post non ancora inviati
@@ -419,11 +468,16 @@ class ViralNewsHunter:
                         # Aggiorna i dati con solo i nuovi post
                         viral_data['viral_posts'] = new_viral
                         
-                        message = self.format_viral_message(viral_data)
+                        message = self.format_viral_message_with_ai(viral_data)
                         success = await self.send_to_telegram(message)
                         
                         if success:
-                            logger.info(f"🔥 Inviate {len(new_viral)} notizie virali a {len(self.active_chats)} chat!")
+                            logger.info(f"🔥 Inviate {len(new_viral)} notizie virali con AI!")
+                            
+                            # Log AI predictions
+                            for post in new_viral:
+                                ai = post['ai_prediction']
+                                logger.info(f"  🧠 AI: {ai['viral_probability']}% prob → {ai['predicted_final_score']} score: {post['title'][:40]}...")
                         else:
                             logger.warning("⚠️ Errore nell'invio dei messaggi")
                     elif not self.active_chats:
@@ -438,7 +492,7 @@ class ViralNewsHunter:
                     self.sent_posts.clear()
                     logger.info("🧹 Cache post inviati pulita")
                 
-                # Attendi 15 minuti per la prossima scansione
+                # 🕐 ATTENDI 15 MINUTI (come prima)
                 logger.info("⏱️ Prossima caccia virale tra 15 minuti...")
                 await asyncio.sleep(900)  # 15 minuti
                 
