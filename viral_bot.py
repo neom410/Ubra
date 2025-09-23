@@ -4,431 +4,379 @@ import time
 import os
 from datetime import datetime, timedelta
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 import aiohttp
 import re
 import json
 import math
+import numpy as np
+from typing import Dict, List, Tuple, Optional
 
 # Configurazione logging
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
+    handlers=[logging.StreamHandler(), logging.FileHandler('trend_bot.log')]
 )
 logger = logging.getLogger(__name__)
 
-# ===== GRADIENT LEARNING AI ENGINE =====
-class GradientLearningAI:
+# ===== ENHANCED EXPONENTIAL GROWTH ANALYZER =====
+class ExponentialGrowthAnalyzer:
     def __init__(self):
-        # File per salvare i pesi appresi
-        self.weights_file = 'ai_weights.json'
-        self.predictions_file = 'predictions_track.json'
+        self.growth_history_file = 'growth_history.json'
+        self.trend_patterns_file = 'trend_patterns.json'
+        self.growth_history = self.load_growth_history()
+        self.trend_patterns = self.load_trend_patterns()
         
-        # Pesi iniziali (verranno aggiustati automaticamente)
-        self.default_weights = {
-            # Pattern specifici
-            'elon_musk': 2.5,
-            'ai_breakthrough': 1.8,
-            'crypto_crash': 2.8,
-            'tech_layoffs': 1.6,
-            'scandal_celebrity': 2.2,
-            'market_crash': 3.0,
-            'space_news': 1.4,
-            'gaming_drama': 1.7,
-            'political_news': 2.1,
-            'health_news': 1.5,
-            'climate_news': 1.3,
-            'sports_news': 1.4,
-            'entertainment': 1.6,
-            'science_discovery': 1.7,
-            'tech_general': 1.5,
-            'business_news': 1.4,
-            'general': 1.0,
-            
-            # Sentiment multipliers
-            'high_emotion_weight': 1.5,
-            'urgency_weight': 2.0,
-            'controversy_weight': 1.8,
-            'numbers_weight': 1.3,
-            'exclusivity_weight': 1.6,
-            
-            # Velocity thresholds
-            'velocity_explosive_threshold': 50.0,
-            'velocity_fast_threshold': 20.0,
-            'velocity_steady_threshold': 10.0,
-            
-            # Engagement weights
-            'engagement_weight': 1.2,
-            'comment_ratio_weight': 1.4,
-            'time_decay_weight': 0.8,
-            
-            # Platform-specific
-            'reddit_hot_multiplier': 1.0,
-            'reddit_rising_multiplier': 1.3,
-            'subreddit_size_weight': 1.1,
-            
-            # Time-based learning
-            'learning_rate': 0.05,
-            'success_boost': 1.03,
-            'failure_reduction': 0.97
-        }
+        # Parametri per analisi esponenziale
+        self.min_data_points = 3
+        self.exponential_threshold = 1.5  # Soglia per crescita esponenziale
+        self.trend_confirmation_time = 45  # minuti per confermare trend
+        self.viral_threshold = 2000  # score minimo per considerare virale
         
-        # Carica pesi salvati o usa default
-        self.weights = self.load_weights()
-        
-        # Tracking predizioni per feedback
-        self.active_predictions = self.load_predictions()
-        
-        # Pattern di riconoscimento avanzato
-        self.pattern_keywords = {
-            'elon_musk': ['elon', 'musk', 'tesla', 'spacex', 'neuralink', 'boring company'],
-            'ai_breakthrough': ['ai', 'artificial intelligence', 'chatgpt', 'gpt', 'openai', 'claude', 'robot', 'automation', 'machine learning', 'neural network'],
-            'crypto_crash': ['bitcoin', 'crypto', 'ethereum', 'blockchain', 'defi', 'nft', 'crash', 'pump', 'dump', 'bull', 'bear'],
-            'tech_layoffs': ['layoffs', 'fired', 'job cuts', 'downsizing', 'restructuring', 'redundant'],
-            'scandal_celebrity': ['scandal', 'controversy', 'exposed', 'caught', 'arrest', 'lawsuit', 'divorce', 'affair'],
-            'market_crash': ['market', 'stock', 'dow', 'nasdaq', 'sp500', 'crash', 'plummet', 'bear market', 'recession'],
-            'space_news': ['space', 'mars', 'moon', 'rocket', 'nasa', 'spacex', 'iss', 'satellite', 'astronaut'],
-            'gaming_drama': ['gaming', 'game', 'streamer', 'twitch', 'youtube', 'esports', 'nintendo', 'sony', 'xbox'],
-            'political_news': ['trump', 'biden', 'election', 'congress', 'senate', 'president', 'politics', 'vote', 'policy'],
-            'health_news': ['covid', 'vaccine', 'pandemic', 'health', 'medical', 'doctor', 'hospital', 'disease', 'cure'],
-            'climate_news': ['climate', 'global warming', 'carbon', 'emission', 'green', 'renewable', 'pollution'],
-            'sports_news': ['football', 'basketball', 'soccer', 'olympics', 'championship', 'world cup', 'nfl', 'nba'],
-            'entertainment': ['movie', 'netflix', 'disney', 'actor', 'actress', 'film', 'tv show', 'series', 'music'],
-            'science_discovery': ['study', 'research', 'scientists', 'discovery', 'breakthrough', 'experiment', 'published'],
-            'tech_general': ['technology', 'tech', 'startup', 'innovation', 'app', 'software', 'hardware', 'gadget'],
-            'business_news': ['business', 'company', 'ceo', 'merger', 'acquisition', 'ipo', 'earnings', 'revenue']
-        }
-        
-        # Sentiment keywords avanzate
-        self.sentiment_keywords = {
-            'high_emotion': ['shocking', 'unbelievable', 'insane', 'crazy', 'amazing', 'incredible', 'breakthrough', 'revolutionary', 'game-changing', 'mind-blowing', 'devastating', 'horrific', 'tragic', 'miraculous'],
-            'urgency': ['breaking', 'urgent', 'just in', 'developing', 'live', 'now', 'alert', 'immediate', 'emergency'],
-            'controversy': ['banned', 'censored', 'forbidden', 'illegal', 'controversial', 'outrageous', 'scandal', 'exposed', 'leaked'],
-            'numbers': ['million', 'billion', 'trillion', '%', '$', 'record', 'highest', 'lowest', 'first', 'largest', 'biggest'],
-            'exclusivity': ['exclusive', 'only', 'never before', 'unprecedented', 'rare', 'secret', 'hidden', 'revealed', 'insider']
+    def load_growth_history(self) -> Dict:
+        """Carica storico crescite"""
+        try:
+            if os.path.exists(self.growth_history_file):
+                with open(self.growth_history_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"Errore caricamento growth history: {e}")
+        return {}
+    
+    def save_growth_history(self):
+        """Salva storico crescite"""
+        try:
+            # Mantieni solo ultimi 7 giorni di dati
+            cutoff = datetime.now() - timedelta(days=7)
+            cleaned_history = {}
+            
+            for post_id, data in self.growth_history.items():
+                if 'data_points' in data and data['data_points']:
+                    last_timestamp = datetime.fromisoformat(data['data_points'][-1]['timestamp'])
+                    if last_timestamp > cutoff:
+                        cleaned_history[post_id] = data
+            
+            self.growth_history = cleaned_history
+            
+            with open(self.growth_history_file, 'w') as f:
+                json.dump(self.growth_history, f, indent=2)
+        except Exception as e:
+            logger.error(f"Errore salvataggio growth history: {e}")
+    
+    def load_trend_patterns(self) -> Dict:
+        """Carica pattern di trend identificati"""
+        try:
+            if os.path.exists(self.trend_patterns_file):
+                with open(self.trend_patterns_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning(f"Errore caricamento trend patterns: {e}")
+        return {
+            'successful_patterns': [],
+            'failed_patterns': [],
+            'keyword_weights': {},
+            'subreddit_multipliers': {}
         }
     
-    def load_weights(self):
-        """Carica pesi salvati o usa default"""
+    def save_trend_patterns(self):
+        """Salva pattern di trend"""
+        try:
+            with open(self.trend_patterns_file, 'w') as f:
+                json.dump(self.trend_patterns, f, indent=2)
+        except Exception as e:
+            logger.error(f"Errore salvataggio trend patterns: {e}")
+    
+    def track_post_growth(self, post_id: str, score: int, comments: int, subreddit: str, title: str):
+        """Traccia la crescita di un post nel tempo"""
+        current_time = datetime.now()
+        
+        if post_id not in self.growth_history:
+            self.growth_history[post_id] = {
+                'subreddit': subreddit,
+                'title': title,
+                'data_points': [],
+                'trend_status': 'monitoring',
+                'first_seen': current_time.isoformat()
+            }
+        
+        # Aggiungi nuovo data point
+        data_point = {
+            'timestamp': current_time.isoformat(),
+            'score': score,
+            'comments': comments,
+            'minutes_since_start': 0
+        }
+        
+        # Calcola minuti dal primo avvistamento
+        first_seen = datetime.fromisoformat(self.growth_history[post_id]['first_seen'])
+        data_point['minutes_since_start'] = (current_time - first_seen).total_seconds() / 60
+        
+        self.growth_history[post_id]['data_points'].append(data_point)
+        
+        # Mantieni solo ultimi 20 data points per efficienza
+        if len(self.growth_history[post_id]['data_points']) > 20:
+            self.growth_history[post_id]['data_points'] = self.growth_history[post_id]['data_points'][-20:]
+    
+    def analyze_exponential_growth(self, post_id: str) -> Optional[Dict]:
+        """Analizza se un post sta crescendo esponenzialmente"""
+        if post_id not in self.growth_history:
+            return None
+        
+        data_points = self.growth_history[post_id]['data_points']
+        if len(data_points) < self.min_data_points:
+            return None
+        
+        # Estrai dati per analisi
+        times = [dp['minutes_since_start'] for dp in data_points]
+        scores = [dp['score'] for dp in data_points]
+        
+        if len(times) < 3 or max(scores) < 50:  # Dati insufficienti
+            return None
+        
+        try:
+            # Calcola tasso di crescita tra punti consecutivi
+            growth_rates = []
+            for i in range(1, len(scores)):
+                if scores[i-1] > 0 and times[i] != times[i-1]:
+                    rate = (scores[i] - scores[i-1]) / (times[i] - times[i-1])
+                    growth_rates.append(max(rate, 0))
+            
+            if not growth_rates:
+                return None
+            
+            # Analizza accelerazione della crescita
+            acceleration = 0
+            if len(growth_rates) >= 2:
+                recent_avg = sum(growth_rates[-2:]) / 2
+                early_avg = sum(growth_rates[:2]) / 2 if len(growth_rates) > 2 else growth_rates[0]
+                if early_avg > 0:
+                    acceleration = recent_avg / early_avg
+            
+            # Calcola velocità media recente
+            recent_velocity = sum(growth_rates[-3:]) / min(3, len(growth_rates))
+            
+            # Stima crescita esponenziale usando regressione semplificata
+            exponential_score = 0
+            
+            # Controlla se la crescita accelera
+            if acceleration > self.exponential_threshold:
+                exponential_score += 30
+            
+            # Controlla velocità assoluta
+            if recent_velocity > 10:  # >10 upvotes/minuto
+                exponential_score += 40
+            elif recent_velocity > 5:
+                exponential_score += 20
+            
+            # Controlla consistenza della crescita
+            if len(growth_rates) >= 3:
+                consistency = 1 - (np.std(growth_rates[-3:]) / (np.mean(growth_rates[-3:]) + 1))
+                exponential_score += consistency * 30
+            
+            # Predici score futuro (semplificato)
+            if recent_velocity > 0:
+                current_score = scores[-1]
+                predicted_1h = current_score + (recent_velocity * 60)
+                predicted_6h = current_score + (recent_velocity * 360 * 0.7)  # Decay factor
+            else:
+                predicted_1h = scores[-1]
+                predicted_6h = scores[-1]
+            
+            return {
+                'exponential_score': min(exponential_score, 100),
+                'growth_acceleration': acceleration,
+                'recent_velocity': recent_velocity,
+                'current_score': scores[-1],
+                'predicted_1h': int(predicted_1h),
+                'predicted_6h': int(predicted_6h),
+                'data_points_count': len(data_points),
+                'tracking_time_minutes': times[-1],
+                'is_exponential': exponential_score > 50,
+                'trend_strength': 'explosive' if exponential_score > 80 else 'strong' if exponential_score > 60 else 'moderate' if exponential_score > 40 else 'weak'
+            }
+            
+        except Exception as e:
+            logger.error(f"Errore analisi esponenziale per {post_id}: {e}")
+            return None
+
+# ===== EMERGING TREND DETECTOR =====
+class EmergingTrendDetector:
+    def __init__(self):
+        self.weights_file = 'trend_weights.json'
+        self.trending_keywords_file = 'trending_keywords.json'
+        
+        # Carica pesi e keywords
+        self.weights = self.load_weights()
+        self.trending_keywords = self.load_trending_keywords()
+        
+        # Pattern per trend emergenti
+        self.emerging_patterns = {
+            'tech_disruption': {
+                'keywords': ['breakthrough', 'revolutionary', 'game-changer', 'disruption', 'innovation', 'first time', 'never before'],
+                'weight': 2.5
+            },
+            'crisis_emerging': {
+                'keywords': ['crisis', 'emergency', 'urgent', 'critical', 'disaster', 'unprecedented', 'breaking'],
+                'weight': 3.0
+            },
+            'viral_moment': {
+                'keywords': ['viral', 'trending', 'everywhere', 'internet', 'meme', 'blowing up', 'taking over'],
+                'weight': 2.0
+            },
+            'market_disruption': {
+                'keywords': ['crash', 'surge', 'record', 'historic', 'all-time', 'massive', 'collapse'],
+                'weight': 2.8
+            },
+            'social_phenomenon': {
+                'keywords': ['phenomenon', 'movement', 'wave', 'spreading', 'everyone', 'millions', 'worldwide'],
+                'weight': 2.2
+            }
+        }
+        
+        # Subreddit con alta probabilità di trend emergenti
+        self.trend_source_subreddits = {
+            'technology': 1.5,
+            'Futurology': 1.4,
+            'singularity': 1.6,
+            'artificial': 1.3,
+            'MachineLearning': 1.2,
+            'cryptocurrency': 1.8,
+            'wallstreetbets': 2.0,
+            'science': 1.3,
+            'space': 1.4,
+            'news': 1.2,
+            'worldnews': 1.3,
+            'breakingnews': 2.5,
+            'todayilearned': 1.1,
+            'Showerthoughts': 1.0,
+            'interestingasfuck': 1.2,
+            'nextfuckinglevel': 1.3,
+            'Damnthatsinteresting': 1.2
+        }
+    
+    def load_weights(self) -> Dict:
+        """Carica pesi per trend detection"""
+        default_weights = {
+            'exponential_weight': 0.4,
+            'velocity_weight': 0.25,
+            'engagement_weight': 0.2,
+            'pattern_weight': 0.15,
+            'time_penalty': 0.1,
+            'subreddit_bonus': 0.1,
+            'keyword_density_weight': 0.3,
+            'comment_ratio_optimal': 0.05  # 5% comment ratio è ottimale
+        }
+        
         try:
             if os.path.exists(self.weights_file):
                 with open(self.weights_file, 'r') as f:
                     saved_weights = json.load(f)
-                    # Merge con default per nuove chiavi
-                    weights = self.default_weights.copy()
-                    weights.update(saved_weights)
-                    logger.info(f"📚 Caricati pesi AI da {self.weights_file}")
-                    return weights
+                    default_weights.update(saved_weights)
         except Exception as e:
-            logger.warning(f"Errore caricamento pesi: {e}")
+            logger.warning(f"Errore caricamento trend weights: {e}")
         
-        logger.info("🆕 Inizializzo pesi AI default")
-        return self.default_weights.copy()
+        return default_weights
     
-    def save_weights(self):
-        """Salva pesi aggiornati"""
+    def load_trending_keywords(self) -> Dict:
+        """Carica keywords trending dinamiche"""
         try:
-            with open(self.weights_file, 'w') as f:
-                json.dump(self.weights, f, indent=2)
-            logger.debug("💾 Pesi AI salvati")
-        except Exception as e:
-            logger.error(f"Errore salvataggio pesi: {e}")
-    
-    def load_predictions(self):
-        """Carica predizioni per tracking"""
-        try:
-            if os.path.exists(self.predictions_file):
-                with open(self.predictions_file, 'r') as f:
+            if os.path.exists(self.trending_keywords_file):
+                with open(self.trending_keywords_file, 'r') as f:
                     return json.load(f)
         except Exception as e:
-            logger.warning(f"Errore caricamento predizioni: {e}")
-        return {}
-    
-    def save_predictions(self):
-        """Salva predizioni attive"""
-        try:
-            with open(self.predictions_file, 'w') as f:
-                json.dump(self.active_predictions, f, indent=2)
-        except Exception as e:
-            logger.error(f"Errore salvataggio predizioni: {e}")
-    
-    def identify_pattern_category(self, title, subreddit):
-        """🎯 Identifica categoria con pattern avanzato"""
-        title_lower = title.lower()
-        subreddit_lower = subreddit.lower()
-        
-        # Controlla ogni pattern
-        for pattern, keywords in self.pattern_keywords.items():
-            for keyword in keywords:
-                if keyword in title_lower or keyword in subreddit_lower:
-                    return pattern
-        
-        return 'general'
-    
-    def analyze_sentiment(self, title):
-        """😍 Analisi sentiment avanzata"""
-        text = title.lower()
-        sentiment_data = {
-            'high_emotion': 0,
-            'urgency': 0,
-            'controversy': 0,
-            'numbers': 0,
-            'exclusivity': 0
-        }
-        
-        # Conta keywords per categoria
-        for category, keywords in self.sentiment_keywords.items():
-            count = sum(1 for keyword in keywords if keyword in text)
-            sentiment_data[category] = count
-        
-        # Calcola score totale
-        total_score = (
-            sentiment_data['high_emotion'] * self.weights['high_emotion_weight'] +
-            sentiment_data['urgency'] * self.weights['urgency_weight'] +
-            sentiment_data['controversy'] * self.weights['controversy_weight'] +
-            sentiment_data['numbers'] * self.weights['numbers_weight'] +
-            sentiment_data['exclusivity'] * self.weights['exclusivity_weight']
-        )
+            logger.warning(f"Errore caricamento trending keywords: {e}")
         
         return {
-            'total_score': min(total_score, 100),
-            'categories': sentiment_data,
-            'intensity': 'high' if total_score > 40 else 'medium' if total_score > 15 else 'low'
+            'hot_keywords': {},
+            'last_update': datetime.now().isoformat(),
+            'keyword_performance': {}
         }
     
-    def calculate_velocity_score(self, post, minutes_ago):
-        """⚡ Calcola score velocità adattivo"""
-        if minutes_ago <= 0:
-            return 0
+    def analyze_emerging_trend_potential(self, post, subreddit_name: str, growth_analysis: Dict) -> Dict:
+        """Analizza il potenziale di trend emergente"""
+        title = post.title.lower()
         
-        velocity = post.score / minutes_ago
+        # 1. Score base da crescita esponenziale
+        exponential_score = growth_analysis.get('exponential_score', 0)
         
-        # Usa soglie adattive
-        explosive_threshold = self.weights['velocity_explosive_threshold']
-        fast_threshold = self.weights['velocity_fast_threshold']
-        steady_threshold = self.weights['velocity_steady_threshold']
+        # 2. Analisi pattern di trend emergente
+        pattern_score = 0
+        matched_patterns = []
         
-        if velocity >= explosive_threshold:
-            return 100  # Explosive
-        elif velocity >= fast_threshold:
-            return 70   # Fast growth
-        elif velocity >= steady_threshold:
-            return 40   # Steady
-        else:
-            return velocity * 2  # Proportional for slow
-    
-    def predict_viral_trajectory(self, post, subreddit, minutes_ago):
-        """🧠 CORE: Predizione con Gradient Learning"""
+        for pattern_name, pattern_data in self.emerging_patterns.items():
+            pattern_matches = sum(1 for keyword in pattern_data['keywords'] if keyword in title)
+            if pattern_matches > 0:
+                pattern_score += pattern_matches * pattern_data['weight'] * 10
+                matched_patterns.append(pattern_name)
         
-        # 1. Identifica pattern
-        pattern_category = self.identify_pattern_category(post.title, subreddit)
-        pattern_multiplier = self.weights.get(pattern_category, 1.0)
+        # 3. Bonus subreddit
+        subreddit_multiplier = self.trend_source_subreddits.get(subreddit_name, 1.0)
         
-        # 2. Analisi sentiment
-        sentiment = self.analyze_sentiment(post.title)
-        sentiment_multiplier = 1 + (sentiment['total_score'] / 100)
-        
-        # 3. Velocità adattiva
-        velocity_score = self.calculate_velocity_score(post, minutes_ago)
-        velocity_multiplier = 1 + (velocity_score / 100)
-        
-        # 4. Engagement analysis
+        # 4. Analisi engagement quality
         if post.score > 0:
-            engagement_ratio = post.num_comments / post.score
-            engagement_multiplier = 1 + (engagement_ratio * self.weights['engagement_weight'])
+            comment_ratio = post.num_comments / post.score
+            # Ratio ottimale intorno al 5%
+            optimal_ratio = self.weights['comment_ratio_optimal']
+            engagement_quality = 1 - abs(comment_ratio - optimal_ratio) / optimal_ratio
+            engagement_quality = max(0, min(engagement_quality, 1))
         else:
-            engagement_multiplier = 1.0
+            engagement_quality = 0
         
-        # 5. Time decay
-        if minutes_ago > 180:  # >3 ore
-            time_multiplier = self.weights['time_decay_weight']
+        # 5. Velocity score
+        velocity_score = min(growth_analysis.get('recent_velocity', 0) * 5, 100)
+        
+        # 6. Time factor (più recente = meglio per trend emergenti)
+        tracking_time = growth_analysis.get('tracking_time_minutes', 0)
+        if tracking_time < 60:  # Meno di 1 ora
+            time_factor = 1.2
+        elif tracking_time < 180:  # Meno di 3 ore
+            time_factor = 1.0
         else:
-            time_multiplier = 1.0
+            time_factor = 0.8
         
-        # 6. CALCOLO PROBABILITÀ con pesi appresi
-        base_probability = 0.3  # 30% base
+        # Calcola score finale
+        final_score = (
+            exponential_score * self.weights['exponential_weight'] +
+            velocity_score * self.weights['velocity_weight'] +
+            engagement_quality * 100 * self.weights['engagement_weight'] +
+            pattern_score * self.weights['pattern_weight']
+        ) * subreddit_multiplier * time_factor
         
-        final_probability = (
-            base_probability * 
-            pattern_multiplier * 
-            sentiment_multiplier * 
-            velocity_multiplier * 
-            engagement_multiplier * 
-            time_multiplier
-        )
-        
-        # Clamp tra 0.01 e 0.99
-        final_probability = max(0.01, min(final_probability, 0.99))
-        
-        # Predici score finale
-        growth_factor = final_probability * 20  # Max 20x growth
-        predicted_final_score = int(post.score * (1 + growth_factor))
-        
-        # Predici peak time (basato su pattern)
-        peak_hours_base = 6  # Default 6 ore
-        if pattern_category in ['market_crash', 'crypto_crash']:
-            peak_hours = 2
-        elif pattern_category in ['elon_musk', 'scandal_celebrity']:
-            peak_hours = 4
-        elif pattern_category in ['space_news', 'science_discovery']:
-            peak_hours = 12
+        # Determina livello di trend
+        if final_score >= 80:
+            trend_level = "🚀 EXPLOSIVE EMERGING"
+            confidence = "ALTISSIMA"
+        elif final_score >= 65:
+            trend_level = "⚡ STRONG EMERGING"
+            confidence = "ALTA"
+        elif final_score >= 50:
+            trend_level = "📈 MODERATE EMERGING"
+            confidence = "MEDIA"
+        elif final_score >= 35:
+            trend_level = "📊 WEAK EMERGING"
+            confidence = "BASSA"
         else:
-            peak_hours = peak_hours_base
+            trend_level = "📱 MONITORING"
+            confidence = "MOLTO BASSA"
         
         return {
-            'viral_probability': round(final_probability * 100, 1),
-            'confidence': sentiment['intensity'],
-            'predicted_peak_hours': peak_hours,
-            'predicted_final_score': predicted_final_score,
-            'pattern_match': pattern_category,
-            'sentiment_analysis': sentiment,
-            'velocity_score': velocity_score,
-            'pattern_multiplier': round(pattern_multiplier, 2),
-            'reasoning': self.generate_reasoning(pattern_category, sentiment, velocity_score, final_probability * 100)
+            'trend_score': min(final_score, 100),
+            'trend_level': trend_level,
+            'confidence': confidence,
+            'exponential_component': exponential_score,
+            'pattern_component': pattern_score,
+            'velocity_component': velocity_score,
+            'engagement_quality': round(engagement_quality * 100, 1),
+            'subreddit_multiplier': subreddit_multiplier,
+            'time_factor': time_factor,
+            'matched_patterns': matched_patterns,
+            'is_emerging_trend': final_score >= 50,
+            'predicted_viral_potential': growth_analysis.get('predicted_6h', 0) > self.weights.get('viral_threshold', 2000)
         }
-    
-    def generate_reasoning(self, pattern, sentiment, velocity, probability):
-        """🤔 Genera spiegazione AI"""
-        reasons = []
-        
-        # Pattern reasoning
-        pattern_explanations = {
-            'elon_musk': "Pattern Elon Musk - viralità quasi garantita",
-            'ai_breakthrough': "AI news - tech community molto interessata",
-            'crypto_crash': "Crypto volatility - spread virale rapido",
-            'scandal_celebrity': "Celebrity scandal - engagement esplosivo",
-            'market_crash': "Market news - panic spreading veloce",
-            'political_news': "Politics - sempre divisivo e virale",
-            'health_news': "Health topic - interesse pubblico alto",
-            'gaming_drama': "Gaming community - passionate engagement"
-        }
-        
-        if pattern in pattern_explanations:
-            reasons.append(pattern_explanations[pattern])
-        
-        # Sentiment reasoning
-        if sentiment['intensity'] == 'high':
-            reasons.append(f"Alto carico emotivo (score: {sentiment['total_score']})")
-        
-        # Velocity reasoning
-        if velocity >= 70:
-            reasons.append("Crescita explosive in corso")
-        elif velocity >= 40:
-            reasons.append("Velocità sostenuta")
-        
-        # Probability reasoning
-        if probability > 75:
-            reasons.append("Tutti indicatori convergono su viral explosion")
-        elif probability > 50:
-            reasons.append("Pattern simili storicamente virali")
-        
-        return " • ".join(reasons[:3])
-    
-    def track_prediction(self, post_id, prediction_data, post_score):
-        """📊 Traccia predizione per future learning"""
-        self.active_predictions[post_id] = {
-            'timestamp': datetime.now().isoformat(),
-            'prediction': prediction_data,
-            'original_score': post_score,
-            'pattern': prediction_data['pattern_match'],
-            'predicted_probability': prediction_data['viral_probability'],
-            'predicted_final_score': prediction_data['predicted_final_score']
-        }
-        self.save_predictions()
-    
-    async def check_and_learn(self, reddit):
-        """🧠 Controlla predizioni passate e impara"""
-        if not self.active_predictions:
-            return
-        
-        current_time = datetime.now()
-        learned_count = 0
-        
-        for post_id, prediction_data in list(self.active_predictions.items()):
-            try:
-                # Controlla predizioni di almeno 6 ore fa
-                prediction_time = datetime.fromisoformat(prediction_data['timestamp'])
-                hours_passed = (current_time - prediction_time).total_seconds() / 3600
-                
-                if hours_passed >= 6:
-                    # Qui dovremmo ricontrollare il post su Reddit
-                    # Per ora usiamo logica semplificata basata sui dati
-                    
-                    original_score = prediction_data['original_score']
-                    predicted_final = prediction_data['predicted_final_score']
-                    predicted_prob = prediction_data['predicted_probability']
-                    pattern = prediction_data['pattern']
-                    
-                    # Stima se è diventato virale (logica semplificata)
-                    estimated_viral = self.estimate_if_went_viral(
-                        original_score, predicted_prob, hours_passed
-                    )
-                    
-                    # GRADIENT LEARNING: Aggiusta pesi
-                    self.apply_gradient_learning(
-                        pattern, predicted_prob, estimated_viral
-                    )
-                    
-                    # Rimuovi da tracking
-                    del self.active_predictions[post_id]
-                    learned_count += 1
-                    
-            except Exception as e:
-                logger.warning(f"Errore learning per {post_id}: {e}")
-                # Rimuovi predizioni problematiche
-                if post_id in self.active_predictions:
-                    del self.active_predictions[post_id]
-        
-        if learned_count > 0:
-            logger.info(f"🧠 Gradient Learning: Aggiornati pesi da {learned_count} predizioni")
-            self.save_weights()
-            self.save_predictions()
-    
-    def estimate_if_went_viral(self, original_score, predicted_prob, hours_passed):
-        """📈 Stima se è diventato virale (logica semplificata)"""
-        # Logica semplificata: alta probabilità + tempo = probabile successo
-        if predicted_prob > 70 and hours_passed > 8:
-            return True
-        elif predicted_prob > 50 and original_score > 200:
-            return True
-        elif predicted_prob > 30 and original_score > 500:
-            return True
-        else:
-            return False
-    
-    def apply_gradient_learning(self, pattern, predicted_prob, actual_viral):
-        """🎯 Applica gradient learning ai pesi"""
-        learning_rate = self.weights['learning_rate']
-        success_boost = self.weights['success_boost']
-        failure_reduction = self.weights['failure_reduction']
-        
-        was_correct = (predicted_prob > 50 and actual_viral) or (predicted_prob <= 50 and not actual_viral)
-        
-        if was_correct:
-            # Predizione corretta - rinforza pattern
-            if pattern in self.weights:
-                self.weights[pattern] *= success_boost
-                logger.debug(f"✅ Rinforzato pattern {pattern}: {self.weights[pattern]:.3f}")
-        else:
-            # Predizione sbagliata - riduci peso pattern
-            if pattern in self.weights:
-                self.weights[pattern] *= failure_reduction
-                logger.debug(f"❌ Ridotto pattern {pattern}: {self.weights[pattern]:.3f}")
-            
-            # Aggiusta anche pesi sentiment se molto sbagliato
-            if abs(predicted_prob - (100 if actual_viral else 0)) > 40:
-                if predicted_prob > 80 and not actual_viral:
-                    # False positive - riduci pesi sentiment
-                    self.weights['high_emotion_weight'] *= failure_reduction
-                    self.weights['urgency_weight'] *= failure_reduction
-                elif predicted_prob < 30 and actual_viral:
-                    # False negative - aumenta pesi sentiment
-                    self.weights['high_emotion_weight'] *= success_boost
-                    self.weights['velocity_explosive_threshold'] *= 0.95  # Soglia più bassa
 
-# ===== ENHANCED VIRAL NEWS HUNTER =====
-class ViralNewsHunter:
+# ===== ENHANCED VIRAL TREND HUNTER =====
+class ViralTrendHunter:
     def __init__(self):
         # Credenziali
         self.reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
@@ -436,47 +384,55 @@ class ViralNewsHunter:
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         
         if not all([self.reddit_client_id, self.reddit_client_secret, self.telegram_token]):
-            raise ValueError("Variabili d'ambiente mancanti!")
+            raise ValueError("❌ Variabili d'ambiente mancanti! Aggiungi REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, TELEGRAM_BOT_TOKEN")
         
-        # 🧠 GRADIENT LEARNING AI
-        self.gradient_ai = GradientLearningAI()
+        # Componenti AI
+        self.growth_analyzer = ExponentialGrowthAnalyzer()
+        self.trend_detector = EmergingTrendDetector()
         
         # State management
         self.active_chats = set()
         self.reddit = None
-        self.sent_posts = set()
+        self.sent_alerts = set()
+        self.last_cleanup = datetime.now()
         
-        # Subreddit per analisi
-        self.viral_subreddits = [
-            'news', 'worldnews', 'breakingnews', 'nottheonion', 'offbeat',
+        # Subreddit ottimizzati per trend emergenti
+        self.trend_subreddits = [
+            # News e Breaking
+            'news', 'worldnews', 'breakingnews', 'nottheonion',
+            # Tech e Innovation
             'technology', 'gadgets', 'Futurology', 'singularity', 'artificial',
-            'MachineLearning', 'cryptocurrency', 'bitcoin', 'ethereum',
-            'business', 'economics', 'stocks', 'wallstreetbets', 'investing',
-            'todayilearned', 'interestingasfuck', 'nextfuckinglevel', 'Damnthatsinteresting',
-            'mildlyinteresting', 'showerthoughts', 'explainlikeimfive',
-            'facepalm', 'publicfreakout', 'instant_regret', 'whatcouldgowrong',
-            'therewasanattempt', 'crappydesign', 'assholedesign',
-            'science', 'space', 'physics', 'biology', 'medicine', 'health',
-            'movies', 'television', 'gaming', 'music', 'books',
-            'bestof', 'announcements', 'blog', 'politics', 'worldpolitics'
+            'MachineLearning', 'OpenAI', 'ChatGPT',
+            # Finance e Crypto
+            'cryptocurrency', 'bitcoin', 'ethereum', 'wallstreetbets', 'investing',
+            'stocks', 'business', 'economics',
+            # Science e Discovery
+            'science', 'space', 'physics', 'biology', 'medicine',
+            # Social e Viral
+            'todayilearned', 'interestingasfuck', 'nextfuckinglevel',
+            'Damnthatsinteresting', 'mildlyinteresting',
+            # Culture e Entertainment
+            'movies', 'television', 'gaming', 'music',
+            # Discussioni
+            'explainlikeimfive', 'Showerthoughts', 'unpopularopinion'
         ]
-        
+    
     async def initialize(self):
-        """Inizializza Reddit connection"""
+        """Inizializza connessioni"""
         try:
             self.reddit = asyncpraw.Reddit(
                 client_id=self.reddit_client_id,
                 client_secret=self.reddit_client_secret,
-                user_agent='ViralNewsHunter-GradientAI/2.0'
+                user_agent='EmergingTrendHunter/3.0'
             )
-            logger.info("✅ Reddit connesso con Gradient AI")
+            logger.info("✅ Reddit connesso - Trend Hunter attivo")
             return True
         except Exception as e:
             logger.error(f"❌ Errore Reddit: {e}")
             return False
     
     async def get_active_chats(self):
-        """Rileva chat attive"""
+        """Rileva e gestisce chat attive"""
         try:
             url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates"
             
@@ -493,358 +449,452 @@ class ViralNewsHunter:
                                     if chat_id not in self.active_chats:
                                         self.active_chats.add(chat_id)
                                         new_chats += 1
-                                        logger.info(f"Nuova chat: {chat_id}")
+                                        logger.info(f"📱 Nuova chat attiva: {chat_id}")
                             
+                            # Pulisci updates
                             if data['result']:
                                 last_update_id = data['result'][-1]['update_id']
                                 clear_url = f"https://api.telegram.org/bot{self.telegram_token}/getUpdates?offset={last_update_id + 1}"
                                 await session.get(clear_url)
                             
                             if new_chats > 0:
-                                logger.info(f"📱 {new_chats} nuove chat. Totale: {len(self.active_chats)}")
+                                logger.info(f"📊 {new_chats} nuove chat. Totale attive: {len(self.active_chats)}")
                         
-                        return True
-                    return False
+                        return len(self.active_chats) > 0
+                    else:
+                        logger.error(f"Errore Telegram API: {response.status}")
+                        return False
                 
         except Exception as e:
-            logger.error(f"Errore chat: {e}")
+            logger.error(f"Errore gestione chat: {e}")
             return False
     
-    async def hunt_viral_news_with_gradient_ai(self):
-        """🧠 Cerca notizie con Gradient Learning AI"""
+    async def scan_for_emerging_trends(self):
+        """🔍 Scansiona per trend emergenti"""
         try:
-            viral_posts = []
-            current_time = datetime.now()
+            trending_posts = []
+            scanned_count = 0
             
-            for subreddit_name in self.viral_subreddits:
+            for subreddit_name in self.trend_subreddits:
                 try:
                     subreddit = await self.reddit.subreddit(subreddit_name)
                     
-                    count = 0
-                    async for post in subreddit.hot(limit=25):
-                        count += 1
-                        
-                        post_time = datetime.fromtimestamp(post.created_utc)
-                        minutes_ago = (current_time - post_time).total_seconds() / 60
-                        
-                        if minutes_ago <= 360 and post.score >= 10:  # 6 ore, >10 upvotes
-                            
-                            # 🧠 GRADIENT AI PREDICTION
-                            ai_prediction = self.gradient_ai.predict_viral_trajectory(
-                                post, subreddit_name, minutes_ago
-                            )
-                            
-                            # Calcola viral score classico
-                            viral_score = self.calculate_viral_score(post, subreddit_name, minutes_ago)
-                            
-                            # Combina AI + score classico
-                            if viral_score >= 60 and post.id not in self.sent_posts:
-                                viral_posts.append({
-                                    'id': post.id,
-                                    'title': post.title,
-                                    'score': post.score,
-                                    'subreddit': subreddit_name,
-                                    'url': f"https://reddit.com{post.permalink}",
-                                    'comments': post.num_comments,
-                                    'created': post_time,
-                                    'viral_score': viral_score,
-                                    'minutes_ago': round(minutes_ago),
-                                    'category': self.categorize_viral_post(post.title, subreddit_name),
-                                    'upvotes_per_min': round(post.score / max(minutes_ago, 1), 1),
-                                    'ai_prediction': ai_prediction
-                                })
-                                
-                                # 📊 Traccia per future learning
-                                self.gradient_ai.track_prediction(post.id, ai_prediction, post.score)
-                        
-                        if count >= 25:
-                            break
-                            
+                    # Scansiona hot + rising per massima copertura
+                    async for post in subreddit.hot(limit=15):
+                        await self._analyze_post(post, subreddit_name, trending_posts)
+                        scanned_count += 1
+                    
+                    async for post in subreddit.rising(limit=10):
+                        await self._analyze_post(post, subreddit_name, trending_posts)
+                        scanned_count += 1
+                    
                 except Exception as e:
-                    logger.warning(f"Errore {subreddit_name}: {e}")
+                    logger.warning(f"⚠️ Errore scansione r/{subreddit_name}: {e}")
                     continue
             
-            viral_posts.sort(key=lambda x: x['viral_score'], reverse=True)
+            # Ordina per trend score
+            trending_posts.sort(key=lambda x: x['trend_analysis']['trend_score'], reverse=True)
             
-            logger.info(f"🧠 Trovati {len(viral_posts)} post con Gradient AI")
+            logger.info(f"🔍 Scansionati {scanned_count} post, trovati {len(trending_posts)} trend emergenti")
             
             return {
-                'viral_posts': viral_posts[:8],
-                'timestamp': current_time
+                'trending_posts': trending_posts[:10],  # Top 10
+                'total_scanned': scanned_count,
+                'timestamp': datetime.now()
             }
             
         except Exception as e:
-            logger.error(f"Errore Gradient AI hunt: {e}")
+            logger.error(f"❌ Errore scansione trend: {e}")
             return None
     
-    def calculate_viral_score(self, post, subreddit, minutes_ago):
-        """Calcola viral score classico (mantenuto)"""
-        score = 0
-        title_lower = post.title.lower()
+    async def _analyze_post(self, post, subreddit_name: str, trending_posts: List):
+        """Analizza singolo post per trend emergente"""
+        try:
+            # Filtra post troppo vecchi (>6 ore)
+            post_time = datetime.fromtimestamp(post.created_utc)
+            hours_ago = (datetime.now() - post_time).total_seconds() / 3600
+            
+            if hours_ago > 6 or post.score < 20:  # Troppo vecchio o troppo pochi upvotes
+                return
+            
+            # Traccia crescita
+            self.growth_analyzer.track_post_growth(
+                post.id, post.score, post.num_comments, subreddit_name, post.title
+            )
+            
+            # Analizza crescita esponenziale
+            growth_analysis = self.growth_analyzer.analyze_exponential_growth(post.id)
+            
+            if not growth_analysis or not growth_analysis['is_exponential']:
+                return
+            
+            # Analizza potenziale trend emergente
+            trend_analysis = self.trend_detector.analyze_emerging_trend_potential(
+                post, subreddit_name, growth_analysis
+            )
+            
+            # Filtra solo trend emergenti significativi
+            if trend_analysis['is_emerging_trend'] and post.id not in self.sent_alerts:
+                trending_posts.append({
+                    'id': post.id,
+                    'title': post.title,
+                    'score': post.score,
+                    'comments': post.num_comments,
+                    'subreddit': subreddit_name,
+                    'url': f"https://reddit.com{post.permalink}",
+                    'created_time': post_time,
+                    'hours_ago': round(hours_ago, 1),
+                    'growth_analysis': growth_analysis,
+                    'trend_analysis': trend_analysis,
+                    'upvotes_per_hour': round(post.score / max(hours_ago, 0.1), 1)
+                })
         
-        if minutes_ago > 0:
-            upvotes_per_minute = post.score / minutes_ago
-            score += min(upvotes_per_minute * 2, 100)
-        
-        if post.score > 1000:
-            score += 50
-        elif post.score > 500:
-            score += 30
-        elif post.score > 100:
-            score += 15
-        
-        if post.num_comments > 500:
-            score += 40
-        elif post.num_comments > 200:
-            score += 25
-        elif post.num_comments > 50:
-            score += 10
-        
-        # Viral keywords
-        viral_indicators = [
-            'breaking', 'urgent', 'developing', 'record', 'highest', 'lowest',
-            'shocking', 'unbelievable', 'viral', 'trending', 'million', 'billion',
-            'elon musk', 'ai', 'chatgpt', 'tesla', 'unprecedented', 'historic'
-        ]
-        
-        for keyword in viral_indicators:
-            if keyword in title_lower:
-                score += 25
-        
-        if minutes_ago > 180:
-            score *= 0.5
-        
-        return int(score)
+        except Exception as e:
+            logger.debug(f"Errore analisi post {getattr(post, 'id', 'unknown')}: {e}")
     
-    def categorize_viral_post(self, title, subreddit):
-        """Categorizza post"""
-        title_lower = title.lower()
-        
-        if any(word in title_lower for word in ['elon', 'tesla']):
-            return '🚗 ELON/TESLA'
-        elif any(word in title_lower for word in ['ai', 'chatgpt', 'robot']):
-            return '🤖 AI/TECH'
-        elif any(word in title_lower for word in ['bitcoin', 'crypto', 'stock']):
-            return '💰 FINANZA'
-        elif any(word in title_lower for word in ['breaking', 'urgent']):
-            return '🚨 BREAKING'
-        elif any(word in title_lower for word in ['trump', 'biden', 'election']):
-            return '🗳️ POLITICS'
-        elif any(word in title_lower for word in ['covid', 'health', 'medical']):
-            return '🏥 HEALTH'
-        elif subreddit == 'todayilearned':
-            return '📚 TIL'
-        else:
-            return '🔥 VIRALE'
-    
-    def format_viral_message_with_gradient_ai(self, data):
-        """📱 Formatta messaggio con Gradient AI"""
-        if not data or not data['viral_posts']:
-            return "❌ Nessuna notizia virale rilevata."
+    def format_trend_alert(self, data) -> str:
+        """📱 Formatta alert per trend emergenti"""
+        if not data or not data['trending_posts']:
+            return "🔍 Nessun trend emergente rilevato al momento."
         
         timestamp = data['timestamp'].strftime("%H:%M - %d/%m/%Y")
+        posts = data['trending_posts']
         
-        message = f"🔥 NOTIZIE VIRALI DELL'ULTIMA ORA 🔥\n"
-        message += f"⏰ Scansione: {timestamp}\n"
-        message += f"🧠 Powered by Gradient Learning AI\n\n"
+        message = f"🚀 TREND EMERGENTI RILEVATI 🚀\n"
+        message += f"⏰ {timestamp} | 🔍 {data['total_scanned']} post analizzati\n"
+        message += f"📊 Analisi Esponenziale + Pattern Recognition\n\n"
         
-        message += "📈 TOP NOTIZIE CHE STANNO DIVENTANDO VIRALI:\n"
+        message += f"📈 {len(posts)} TREND IN RAPIDA CRESCITA:\n"
         
-        for i, post in enumerate(data['viral_posts'], 1):
-            title = post['title'][:65] + "..." if len(post['title']) > 65 else post['title']
+        for i, post in enumerate(posts[:6], 1):  # Max 6 per evitare messaggi troppo lunghi
+            # Tronca titolo
+            title = post['title'][:60] + "..." if len(post['title']) > 60 else post['title']
             title = title.replace('[', '').replace(']', '').replace('*', '')
             
-            # 🧠 AI DATA
-            ai = post['ai_prediction']
+            growth = post['growth_analysis']
+            trend = post['trend_analysis']
             
-            # Emoji confidence basato su probabilità AI
-            if ai['viral_probability'] >= 75:
-                ai_emoji = "🚀🔥"
-                confidence_text = "ALTISSIMA"
-            elif ai['viral_probability'] >= 60:
-                ai_emoji = "⚡📈"
-                confidence_text = "ALTA" 
-            elif ai['viral_probability'] >= 40:
-                ai_emoji = "📊🎯"
-                confidence_text = "MEDIA"
+            # Header con emoji trend level
+            if "EXPLOSIVE" in trend['trend_level']:
+                emoji = "🚀🔥"
+            elif "STRONG" in trend['trend_level']:
+                emoji = "⚡📈"
             else:
-                ai_emoji = "📱💭"
-                confidence_text = "BASSA"
+                emoji = "📊🎯"
             
-            message += f"\n{post['category']} {i}. {title}\n"
-            message += f"🔥 Viral Score: {post['viral_score']} | "
-            message += f"👍 {post['score']} ({post['upvotes_per_min']}/min) | "
-            message += f"💬 {post['comments']}\n"
+            message += f"\n{emoji} {i}. {title}\n"
             
-            # 🧠 AI PREDICTIONS con Gradient Learning
-            message += f"{ai_emoji} AI Gradient ({confidence_text}): {ai['viral_probability']}%\n"
-            message += f"📈 Predice → {ai['predicted_final_score']:,} upvotes in {ai['predicted_peak_hours']}h\n"
-            message += f"🎯 Pattern: {ai['pattern_match']} (x{ai['pattern_multiplier']})\n"
+            # Statistiche attuali
+            message += f"📊 {post['score']} upvotes ({post['upvotes_per_hour']}/h) | 💬 {post['comments']}\n"
             
-            # Reasoning AI
-            if ai.get('reasoning'):
-                message += f"🧠 {ai['reasoning']}\n"
+            # Analisi crescita esponenziale
+            message += f"📈 Crescita: {growth['trend_strength'].upper()} "
+            message += f"(Score: {growth['exponential_score']:.0f})\n"
+            message += f"⚡ Velocità: {growth['recent_velocity']:.1f} upvotes/min\n"
             
-            message += f"📍 r/{post['subreddit']} | ⏱️ {post['minutes_ago']} min fa\n"
+            # Predizioni
+            message += f"🔮 Predizione 1h: {growth['predicted_1h']:,} | 6h: {growth['predicted_6h']:,}\n"
+            
+            # Trend analysis
+            message += f"🎯 {trend['trend_level']} ({trend['confidence']})\n"
+            if trend['matched_patterns']:
+                patterns = ', '.join(trend['matched_patterns'][:2])
+                message += f"🔍 Pattern: {patterns}\n"
+            
+            # Info post
+            message += f"📍 r/{post['subreddit']} | ⏱️ {post['hours_ago']}h fa\n"
             message += f"🔗 {post['url']}\n"
         
-        # Statistiche AI
-        total_predictions = len(data['viral_posts'])
-        avg_ai_prob = sum(p['ai_prediction']['viral_probability'] for p in data['viral_posts']) / total_predictions
+        # Summary stats
+        avg_trend_score = sum(p['trend_analysis']['trend_score'] for p in posts) / len(posts)
+        explosive_count = sum(1 for p in posts if "EXPLOSIVE" in p['trend_analysis']['trend_level'])
         
-        # Conteggio patterns riconosciuti
-        patterns_found = {}
-        for post in data['viral_posts']:
-            pattern = post['ai_prediction']['pattern_match']
-            patterns_found[pattern] = patterns_found.get(pattern, 0) + 1
-        
-        top_pattern = max(patterns_found.items(), key=lambda x: x[1])[0] if patterns_found else 'general'
-        
-        message += f"\n🧠 GRADIENT AI STATS:\n"
-        message += f"📊 {total_predictions} predizioni | Confidence media: {avg_ai_prob:.1f}%\n"
-        message += f"🎯 Pattern dominante: {top_pattern} ({patterns_found.get(top_pattern, 0)} notizie)\n"
-        message += f"📚 Learning attivo: pesi si adattano automaticamente"
+        message += f"\n📊 RIEPILOGO TREND:\n"
+        message += f"⚡ {explosive_count} trend esplosivi | Confidence media: {avg_trend_score:.0f}%\n"
+        message += f"🔍 Prossima scansione tra 20 minuti\n"
+        message += f"🧠 AI Engine: Exponential Growth Analyzer v3.0"
         
         return message
     
-    async def send_to_telegram(self, message):
-        """📤 Invia a Telegram"""
+    async def send_trend_alert(self, message: str):
+        """📤 Invia alert trend su Telegram"""
         if not self.active_chats:
-            logger.warning("Nessuna chat attiva")
+            logger.warning("📱 Nessuna chat attiva per invio alert")
             return False
         
         success_count = 0
         
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-            for chat_id in self.active_chats.copy():
+            for chat_id in list(self.active_chats):  # Copy per evitare modifiche durante iterazione
                 try:
                     url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
                     payload = {
                         'chat_id': chat_id,
                         'text': message,
-                        'disable_web_page_preview': True
+                        'disable_web_page_preview': True,
+                        'parse_mode': 'HTML'
                     }
                     
                     async with session.post(url, json=payload) as response:
                         if response.status == 200:
-                            logger.info(f"Messaggio inviato: {chat_id}")
                             success_count += 1
+                            logger.info(f"📤 Alert inviato a chat {chat_id}")
                         else:
-                            logger.error(f"Errore invio {chat_id}: {response.status}")
+                            error_text = await response.text()
+                            logger.error(f"❌ Errore invio chat {chat_id}: {response.status} - {error_text}")
+                            
+                            # Rimuovi chat inattive
                             if response.status in [400, 403, 404]:
                                 self.active_chats.discard(chat_id)
+                                logger.info(f"🗑️ Rimossa chat inattiva: {chat_id}")
                                 
                 except Exception as e:
-                    logger.error(f"Errore invio {chat_id}: {e}")
+                    logger.error(f"❌ Errore invio chat {chat_id}: {e}")
         
+        logger.info(f"📊 Alert inviato a {success_count}/{len(self.active_chats)} chat")
         return success_count > 0
     
-    async def run_viral_hunter_with_gradient_ai(self):
-        """🚀 MAIN LOOP con Gradient Learning"""
-        logger.info("🧠 Avvio Viral News Hunter con Gradient Learning AI...")
+    async def cleanup_data(self):
+        """🧹 Pulizia periodica dei dati"""
+        try:
+            # Pulisci sent_alerts (mantieni solo ultime 24h)
+            if len(self.sent_alerts) > 500:
+                self.sent_alerts.clear()
+                logger.info("🧹 Cache alert pulita")
+            
+            # Salva dati analyzer
+            self.growth_analyzer.save_growth_history()
+            self.trend_detector.save_weights()
+            
+            # Update timestamp
+            self.last_cleanup = datetime.now()
+            
+            logger.info("🧹 Cleanup completato")
+            
+        except Exception as e:
+            logger.error(f"❌ Errore cleanup: {e}")
+    
+    async def update_trend_learning(self):
+        """🧠 Aggiorna apprendimento sui trend"""
+        try:
+            # Controlla predizioni passate e aggiorna pesi
+            verified_trends = 0
+            
+            for post_id, data in list(self.growth_analyzer.growth_history.items()):
+                if len(data['data_points']) >= 4:  # Dati sufficienti
+                    first_score = data['data_points'][0]['score']
+                    last_score = data['data_points'][-1]['score']
+                    
+                    # Se il post è cresciuto significativamente, era un vero trend
+                    if last_score > first_score * 3 and last_score > 1000:
+                        verified_trends += 1
+                        
+                        # Aggiorna pattern weights basandosi sui successi
+                        title_lower = data['title'].lower()
+                        for pattern_name, pattern_data in self.trend_detector.emerging_patterns.items():
+                            for keyword in pattern_data['keywords']:
+                                if keyword in title_lower:
+                                    # Rinforza pattern di successo
+                                    pattern_data['weight'] = min(pattern_data['weight'] * 1.02, 5.0)
+            
+            if verified_trends > 0:
+                logger.info(f"🧠 Apprendimento: {verified_trends} trend verificati, pesi aggiornati")
+                self.trend_detector.save_weights()
+            
+        except Exception as e:
+            logger.error(f"❌ Errore update learning: {e}")
+    
+    async def run_trend_hunter(self):
+        """🚀 MAIN LOOP - Trend Hunter Principale"""
+        logger.info("🚀 Avvio Enhanced Trend Hunter...")
+        logger.info("🎯 Focus: Anticipare fenomeni emergenti con analisi esponenziale")
+        logger.info("⏰ Scansione ogni 20 minuti + apprendimento automatico")
         
         if not await self.initialize():
             logger.error("❌ Impossibile inizializzare Reddit!")
             return
         
-        logger.info("✅ Gradient Learning AI Bot avviato!")
-        logger.info("🧠 AI impara automaticamente dai risultati")
-        logger.info("⏰ Scansione ogni 15 minuti + learning check ogni ora")
+        logger.info("✅ Trend Hunter operativo!")
         
         cycle_count = 0
         
         while True:
             try:
+                cycle_start = time.time()
                 cycle_count += 1
                 
-                # Rileva nuove chat
-                await self.get_active_chats()
+                logger.info(f"🔄 Ciclo {cycle_count} - Scansione trend emergenti...")
                 
-                # 🧠 GRADIENT LEARNING CHECK (ogni 4 cicli = ogni ora)
-                if cycle_count % 4 == 0:
-                    logger.info("🧠 Controllo predizioni passate per learning...")
-                    await self.gradient_ai.check_and_learn(self.reddit)
+                # 1. Verifica chat attive
+                has_chats = await self.get_active_chats()
                 
-                # Cerca viral news con Gradient AI
-                logger.info("🔍 Scansione viral con Gradient AI...")
-                viral_data = await self.hunt_viral_news_with_gradient_ai()
+                # 2. Scansiona per trend emergenti
+                trend_data = await self.scan_for_emerging_trends()
                 
-                if viral_data and viral_data['viral_posts']:
-                    new_viral = [p for p in viral_data['viral_posts'] if p['id'] not in self.sent_posts]
+                if trend_data and trend_data['trending_posts']:
+                    new_trends = [
+                        p for p in trend_data['trending_posts'] 
+                        if p['id'] not in self.sent_alerts
+                    ]
                     
-                    if new_viral and self.active_chats:
-                        # Aggiorna sent posts
-                        for post in new_viral:
-                            self.sent_posts.add(post['id'])
+                    if new_trends and has_chats:
+                        # Aggiorna sent alerts
+                        for post in new_trends:
+                            self.sent_alerts.add(post['id'])
                         
-                        viral_data['viral_posts'] = new_viral
-                        message = self.format_viral_message_with_gradient_ai(viral_data)
-                        success = await self.send_to_telegram(message)
+                        # Invia alert solo per nuovi trend
+                        trend_data['trending_posts'] = new_trends
+                        message = self.format_trend_alert(trend_data)
+                        
+                        success = await self.send_trend_alert(message)
                         
                         if success:
-                            logger.info(f"🔥 Inviate {len(new_viral)} notizie con Gradient AI!")
+                            logger.info(f"🔥 {len(new_trends)} nuovi trend emergenti inviati!")
                             
-                            # Log AI predictions per monitoring
-                            for post in new_viral:
-                                ai = post['ai_prediction']
+                            # Log trend details
+                            for post in new_trends[:3]:  # Log primi 3
+                                trend = post['trend_analysis']
+                                growth = post['growth_analysis']
                                 logger.info(
-                                    f"  🧠 {ai['pattern_match']}: {ai['viral_probability']}% "
-                                    f"→ {ai['predicted_final_score']} | {post['title'][:35]}..."
+                                    f"  🚀 {trend['trend_level']}: {trend['trend_score']:.0f}% | "
+                                    f"Velocity: {growth['recent_velocity']:.1f}/min | "
+                                    f"{post['title'][:40]}..."
                                 )
                         else:
-                            logger.warning("⚠️ Errore invio messaggi")
+                            logger.warning("⚠️ Errore invio alert trend")
                     
-                    elif not self.active_chats:
-                        logger.info("⏳ Nessuna chat attiva")
+                    elif not has_chats:
+                        logger.info("📱 Trend rilevati ma nessuna chat attiva")
                     else:
-                        logger.info("⚠️ Nessuna nuova notizia virale")
+                        logger.info("🔍 Nessun nuovo trend emergente")
                 else:
-                    logger.info("⚠️ Nessuna notizia virale trovata")
+                    logger.info("📊 Nessun trend emergente significativo rilevato")
                 
-                # Pulizia cache
-                if len(self.sent_posts) > 1000:
-                    self.sent_posts.clear()
-                    logger.info("🧹 Cache pulita")
+                # 3. Apprendimento e pulizia periodica
+                if cycle_count % 6 == 0:  # Ogni 2 ore (6 cicli * 20 min)
+                    logger.info("🧠 Aggiornamento apprendimento...")
+                    await self.update_trend_learning()
                 
-                # Log stato AI ogni 8 cicli (ogni 2 ore)
-                if cycle_count % 8 == 0:
-                    tracked_predictions = len(self.gradient_ai.active_predictions)
-                    logger.info(f"🧠 AI Status: {tracked_predictions} predizioni in tracking")
+                if cycle_count % 12 == 0:  # Ogni 4 ore
+                    logger.info("🧹 Pulizia dati periodica...")
+                    await self.cleanup_data()
+                
+                # 4. Statistiche periodiche
+                if cycle_count % 18 == 0:  # Ogni 6 ore
+                    total_tracked = len(self.growth_analyzer.growth_history)
+                    active_trends = sum(
+                        1 for data in self.growth_analyzer.growth_history.values()
+                        if len(data['data_points']) >= 3
+                    )
                     
-                    # Mostra alcuni pesi appresi
-                    key_weights = {
-                        'elon_musk': self.gradient_ai.weights.get('elon_musk', 0),
-                        'ai_breakthrough': self.gradient_ai.weights.get('ai_breakthrough', 0),
-                        'crypto_crash': self.gradient_ai.weights.get('crypto_crash', 0)
-                    }
-                    logger.info(f"📊 Key weights: {key_weights}")
+                    logger.info(f"📊 Stats: {total_tracked} post tracciati, {active_trends} trend attivi")
+                    logger.info(f"📱 {len(self.active_chats)} chat attive, {len(self.sent_alerts)} alert inviati")
                 
-                # 🕐 ATTENDI 15 MINUTI
-                logger.info("⏱️ Prossima scansione Gradient AI tra 15 minuti...")
-                await asyncio.sleep(900)  # 15 minuti
+                # 5. Calcola tempo di attesa
+                cycle_time = time.time() - cycle_start
+                wait_time = max(1200 - cycle_time, 60)  # 20 min - tempo ciclo, min 1 min
+                
+                logger.info(f"⏱️ Ciclo completato in {cycle_time:.1f}s. Prossima scansione tra {wait_time/60:.1f} min")
+                
+                # 6. Attendi prossimo ciclo
+                await asyncio.sleep(wait_time)
                 
             except KeyboardInterrupt:
-                logger.info("🛑 Bot fermato")
+                logger.info("🛑 Trend Hunter fermato dall'utente")
                 break
+                
             except Exception as e:
-                logger.error(f"Errore main loop: {e}")
-                logger.info("🔄 Riprovando tra 3 minuti...")
+                logger.error(f"❌ Errore main loop: {e}")
+                logger.info("🔄 Riavvio tra 3 minuti...")
                 await asyncio.sleep(180)
         
-        # Cleanup
-        if self.reddit:
-            await self.reddit.close()
-            logger.info("🔌 Reddit chiuso")
+        # Cleanup finale
+        try:
+            if self.reddit:
+                await self.reddit.close()
+            
+            await self.cleanup_data()
+            logger.info("✅ Trend Hunter terminato correttamente")
+            
+        except Exception as e:
+            logger.error(f"Errore cleanup finale: {e}")
+
+# ===== STARTUP E MONITORAGGIO =====
+async def health_check():
+    """Verifica stato servizi"""
+    try:
+        # Test variabili ambiente
+        required_vars = ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'TELEGRAM_BOT_TOKEN']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            logger.error(f"❌ Variabili mancanti: {', '.join(missing_vars)}")
+            return False
+        
+        # Test connessione Telegram
+        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        url = f"https://api.telegram.org/bot{token}/getMe"
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error(f"❌ Telegram bot non raggiungibile: {response.status}")
+                    return False
+        
+        logger.info("✅ Health check superato")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Health check fallito: {e}")
+        return False
 
 async def main():
-    """Main function"""
-    try:
-        bot = ViralNewsHunter()
-        await bot.run_viral_hunter_with_gradient_ai()
-    except Exception as e:
-        logger.error(f"Errore critico: {e}")
-        await asyncio.sleep(60)
+    """Funzione principale con gestione errori avanzata"""
+    logger.info("🚀 Avvio Enhanced Reddit Trend Hunter v3.0")
+    logger.info("🎯 Specializzato in rilevamento trend emergenti")
+    logger.info("📊 Analisi esponenziale + Pattern recognition")
+    
+    # Health check iniziale
+    if not await health_check():
+        logger.error("❌ Health check fallito - terminazione")
+        return
+    
+    retry_count = 0
+    max_retries = 5
+    
+    while retry_count < max_retries:
+        try:
+            hunter = ViralTrendHunter()
+            await hunter.run_trend_hunter()
+            break  # Uscita normale
+            
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"❌ Errore critico (tentativo {retry_count}/{max_retries}): {e}")
+            
+            if retry_count < max_retries:
+                wait_time = min(300 * retry_count, 1800)  # Max 30 min
+                logger.info(f"🔄 Riavvio tra {wait_time/60:.1f} minuti...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error("❌ Numero massimo tentativi raggiunto")
+                break
+    
+    logger.info("🔚 Trend Hunter terminato")
 
+# ===== ENTRY POINT =====
 if __name__ == "__main__":
-    logger.info("🚀 Launching Gradient Learning AI Viral News Hunter...")
-    asyncio.run(main())
+    logger.info("=" * 60)
+    logger.info("🚀 ENHANCED REDDIT TREND HUNTER v3.0")
+    logger.info("🎯 Anticipazione Fenomeni Emergenti")
+    logger.info("📊 Exponential Growth Analysis + AI Learning")
+    logger.info("⚡ Ottimizzato per Fly.io + Piano Free")
+    logger.info("=" * 60)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Terminazione forzata")
+    except Exception as e:
+        logger.error(f"❌ Errore fatale: {e}")
+        exit(1)
