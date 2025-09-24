@@ -848,7 +848,13 @@ class EnhancedGradientLearningAI:
     def get_learning_insights(self):
         """Ottieni insights sul learning"""
         if not self.performance_stats['accuracy_trend']:
-            return "Nessun dato di performance ancora"
+            return {
+                'overall_accuracy': 50.0,
+                'recent_accuracy': 50.0,
+                'total_predictions': 0,
+                'best_patterns': [],
+                'trend': 'stable'
+            }
         
         recent_accuracy = sum(list(self.performance_stats['accuracy_trend'])[-10:]) / min(10, len(self.performance_stats['accuracy_trend'])) * 100
         overall_accuracy = self.calculate_current_accuracy()
