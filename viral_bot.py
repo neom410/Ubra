@@ -4,15 +4,10 @@ import aiohttp
 import json
 import os
 import logging
-import numpy as np
+import math
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict, deque
-import statistics
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
-import threading
-from typing import Dict, List, Set, Any
 import hashlib
 
 # Configurazione logging
@@ -23,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== ADVANCED INTEREST ANALYZER =====
+# ===== ADVANCED INTEREST ANALYZER (Senza sklearn) =====
 class AdvancedInterestAnalyzer:
     def __init__(self):
         self.interests_file = 'user_interests.json'
@@ -32,16 +27,15 @@ class AdvancedInterestAnalyzer:
         
         # Database degli interessi
         self.interest_database = self.load_interests()
-        self.conversation_buffer = deque(maxlen=1000)  # Ultime conversazioni
+        self.conversation_buffer = deque(maxlen=500)  # Ultime conversazioni
         self.interest_trends = defaultdict(lambda: {'count': 0, 'momentum': 0, 'history': []})
         
         # Parametri di analisi avanzata
         self.analysis_config = {
-            'min_discussion_length': 50,  # Caratteri minimi per analisi
-            'min_comments_threshold': 5,  # Commenti minimi per considerare "discussione"
+            'min_discussion_length': 30,  # Caratteri minimi per analisi
+            'min_comments_threshold': 3,  # Commenti minimi per considerare "discussione"
             'engagement_weight': 2.0,     # Peso engagement nelle discussioni
             'time_decay_hours': 72,       # Decadimento interesse nel tempo
-            'cluster_topics': 8,          # Numero di cluster per topic discovery
             'emerging_threshold': 0.15    # Soglia per trend emergenti
         }
         
@@ -64,71 +58,76 @@ class AdvancedInterestAnalyzer:
             'relationships': self.get_relationships_keywords()
         }
         
-        # ML Components
-        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words='english', ngram_range=(1, 2))
-        self.cluster_model = None
-        self.is_training = False
+        # Stop words per pulizia testo
+        self.stop_words = {
+            'the', 'and', 'for', 'with', 'this', 'that', 'have', 'has', 'was', 'were', 
+            'are', 'you', 'your', 'about', 'from', 'their', 'they', 'been', 'will', 
+            'would', 'should', 'could', 'what', 'when', 'where', 'why', 'how', 'which',
+            'who', 'whom', 'there', 'here', 'been', 'being', 'have', 'has', 'had',
+            'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+            'must', 'can', 'cannot', 'couldnt', 'wouldnt', 'shouldnt', 'mightnt'
+        }
 
     def get_tech_keywords(self):
         return ['ai', 'artificial intelligence', 'machine learning', 'programming', 'software', 
                 'hardware', 'startup', 'innovation', 'digital', 'tech', 'coding', 'developer',
-                'app', 'website', 'cloud', 'data science', 'cybersecurity', 'blockchain']
+                'app', 'website', 'cloud', 'data science', 'cybersecurity', 'blockchain', 'computer']
 
     def get_gaming_keywords(self):
         return ['game', 'gaming', 'playstation', 'xbox', 'nintendo', 'steam', 'esports',
-                'video game', 'gamer', 'multiplayer', 'singleplayer', 'release', 'update']
+                'video game', 'gamer', 'multiplayer', 'singleplayer', 'release', 'update', 'console']
 
     def get_entertainment_keywords(self):
         return ['movie', 'film', 'tv show', 'netflix', 'youtube', 'music', 'spotify',
-                'celebrity', 'actor', 'director', 'album', 'song', 'streaming']
+                'celebrity', 'actor', 'director', 'album', 'song', 'streaming', 'entertainment']
 
     def get_lifestyle_keywords(self):
         return ['fitness', 'workout', 'diet', 'nutrition', 'travel', 'food', 'cooking',
-                'fashion', 'beauty', 'home', 'decor', 'gardening', 'pet', 'hobby']
+                'fashion', 'beauty', 'home', 'decor', 'gardening', 'pet', 'hobby', 'lifestyle']
 
     def get_science_keywords(self):
         return ['science', 'research', 'discovery', 'space', 'physics', 'biology',
-                'chemistry', 'astronomy', 'innovation', 'study', 'scientist']
+                'chemistry', 'astronomy', 'innovation', 'study', 'scientist', 'experiment']
 
     def get_business_keywords(self):
         return ['business', 'startup', 'entrepreneur', 'marketing', 'sales', 'company',
-                'industry', 'market', 'economy', 'investment', 'strategy']
+                'industry', 'market', 'economy', 'investment', 'strategy', 'profit']
 
     def get_politics_keywords(self):
         return ['politics', 'government', 'election', 'policy', 'law', 'democrat',
-                'republican', 'parliament', 'senate', 'vote', 'political']
+                'republican', 'parliament', 'senate', 'vote', 'political', 'policy']
 
     def get_social_keywords(self):
         return ['social', 'society', 'community', 'culture', 'relationship', 'friendship',
-                'network', 'communication', 'media', 'social media', 'connection']
+                'network', 'communication', 'media', 'social media', 'connection', 'social']
 
     def get_life_keywords(self):
         return ['life', 'personal', 'experience', 'story', 'advice', 'help', 'support',
-                'mental health', 'self improvement', 'motivation', 'happiness']
+                'mental health', 'self improvement', 'motivation', 'happiness', 'life']
 
     def get_job_keywords(self):
         return ['job', 'career', 'work', 'employment', 'hire', 'recruitment', 'salary',
-                'interview', 'resume', 'career change', 'remote work', 'promotion']
+                'interview', 'resume', 'career change', 'remote work', 'promotion', 'work']
 
     def get_education_keywords(self):
         return ['education', 'school', 'university', 'student', 'learn', 'study',
-                'course', 'teacher', 'academic', 'degree', 'online learning']
+                'course', 'teacher', 'academic', 'degree', 'online learning', 'education']
 
     def get_health_keywords(self):
         return ['health', 'medical', 'doctor', 'hospital', 'treatment', 'medicine',
-                'wellness', 'fitness', 'nutrition', 'mental health', 'therapy']
+                'wellness', 'fitness', 'nutrition', 'mental health', 'therapy', 'health']
 
     def get_environment_keywords(self):
         return ['environment', 'climate', 'sustainability', 'eco', 'green', 'pollution',
-                'renewable', 'energy', 'conservation', 'nature', 'planet']
+                'renewable', 'energy', 'conservation', 'nature', 'planet', 'environment']
 
     def get_finance_keywords(self):
         return ['finance', 'money', 'investment', 'stock', 'crypto', 'bank',
-                'saving', 'budget', 'financial', 'wealth', 'retirement']
+                'saving', 'budget', 'financial', 'wealth', 'retirement', 'finance']
 
     def get_relationships_keywords(self):
         return ['relationship', 'dating', 'marriage', 'friend', 'family', 'love',
-                'partner', 'communication', 'breakup', 'friendship']
+                'partner', 'communication', 'breakup', 'friendship', 'relationship']
 
     def load_interests(self):
         try:
@@ -148,16 +147,40 @@ class AdvancedInterestAnalyzer:
 
     def analyze_conversation_depth(self, post):
         """Analizza la profondità e qualità della discussione"""
-        if not hasattr(post, 'comments') or post.num_comments < self.analysis_config['min_comments_threshold']:
+        if not hasattr(post, 'num_comments') or post.num_comments < self.analysis_config['min_comments_threshold']:
             return 0
         
         # Calcola engagement score basato su commenti/upvotes ratio
         engagement_score = min(post.num_comments / max(1, post.score), 10)
         
-        # Considera la lunghezza media dei commenti (se disponibile)
-        discussion_quality = engagement_score * self.analysis_config['engagement_weight']
+        # Bonus per discussioni lunghe
+        text_length = len(getattr(post, 'selftext', ''))
+        if text_length > 500:
+            engagement_score *= 1.5
+        elif text_length > 200:
+            engagement_score *= 1.2
         
-        return discussion_quality
+        return engagement_score
+
+    def categorize_topic(self, title, subreddit):
+        """Categorizza il topic basandosi su titolo e subreddit"""
+        text_lower = f"{title} {subreddit}".lower()
+        category_scores = defaultdict(int)
+        
+        for category, keywords in self.interest_categories.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    # Punteggio più alto per match esatti
+                    if f" {keyword} " in f" {text_lower} ":
+                        category_scores[category] += 3
+                    else:
+                        category_scores[category] += 1
+        
+        if category_scores:
+            best_category = max(category_scores.items(), key=lambda x: x[1])
+            return best_category[0] if best_category[1] > 0 else 'general'
+        
+        return 'general'
 
     def extract_interest_patterns(self, text, category, engagement_score):
         """Estrae pattern di interesse dal testo"""
@@ -168,8 +191,10 @@ class AdvancedInterestAnalyzer:
         for keyword in self.interest_categories.get(category, []):
             if keyword in text_lower:
                 frequency = text_lower.count(keyword)
+                importance = frequency * engagement_score
                 patterns[keyword] = {
                     'frequency': frequency,
+                    'importance': importance,
                     'engagement': engagement_score,
                     'timestamp': datetime.now().isoformat()
                 }
@@ -179,19 +204,18 @@ class AdvancedInterestAnalyzer:
     def calculate_interest_momentum(self, category, new_engagement):
         """Calcola il momentum di interesse per una categoria"""
         current_trend = self.interest_trends[category]
-        time_decay = self.analysis_config['time_decay_hours']
         
         # Applica decadimento temporale
-        current_count = current_trend['count'] * 0.9  # Decadimento
+        current_count = current_trend['count'] * 0.85  # Decadimento più aggressivo
         new_count = current_count + new_engagement
         
         # Calcola momentum (cambiamento recente)
-        momentum = new_engagement - current_trend['count']
+        momentum = new_engagement - (current_trend['count'] * 0.9)
         
         self.interest_trends[category] = {
             'count': new_count,
             'momentum': momentum,
-            'history': current_trend['history'][-99:] + [{'count': new_count, 'timestamp': datetime.now().isoformat()}]
+            'history': current_trend['history'][-49:] + [{'count': new_count, 'timestamp': datetime.now().isoformat()}]
         }
         
         return momentum
@@ -201,11 +225,14 @@ class AdvancedInterestAnalyzer:
         emerging = []
         
         for category, trend in self.interest_trends.items():
-            if len(trend['history']) >= 3:
+            if len(trend['history']) >= 2:
                 recent_growth = trend['momentum']
-                avg_growth = np.mean([h['count'] for h in trend['history'][-3:]])
+                if len(trend['history']) >= 3:
+                    avg_growth = sum(h['count'] for h in trend['history'][-3:]) / 3
+                else:
+                    avg_growth = trend['count']
                 
-                if recent_growth > avg_growth * self.analysis_config['emerging_threshold']:
+                if recent_growth > 0 and recent_growth > avg_growth * self.analysis_config['emerging_threshold']:
                     emerging.append({
                         'category': category,
                         'momentum': recent_growth,
@@ -215,65 +242,69 @@ class AdvancedInterestAnalyzer:
         
         return sorted(emerging, key=lambda x: x['momentum'], reverse=True)
 
-    def cluster_similar_interests(self, conversations):
-        """Clusterizza conversazioni simili usando ML"""
-        if len(conversations) < 10:
+    def simple_text_clustering(self, conversations):
+        """Clustering semplificato senza ML"""
+        if len(conversations) < 5:
             return []
         
-        try:
-            texts = [conv['text'] for conv in conversations if len(conv['text']) > 50]
-            
-            if len(texts) < 5:
-                return []
-            
-            # Vectorizzazione TF-IDF
-            X = self.vectorizer.fit_transform(texts)
-            
-            # Clustering K-means
-            n_clusters = min(self.analysis_config['cluster_topics'], len(texts))
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-            clusters = kmeans.fit_predict(X)
-            
-            # Estrai topic principali per cluster
-            feature_names = self.vectorizer.get_feature_names_out()
-            cluster_topics = []
-            
-            for i in range(n_clusters):
-                cluster_indices = np.where(clusters == i)[0]
-                if len(cluster_indices) > 0:
-                    # Trova parole più importanti per il cluster
-                    cluster_center = kmeans.cluster_centers_[i]
-                    top_indices = cluster_center.argsort()[-10:][::-1]
-                    top_words = [feature_names[idx] for idx in top_indices]
-                    
-                    cluster_topics.append({
-                        'cluster_id': i,
-                        'size': len(cluster_indices),
-                        'top_words': top_words,
-                        'sample_titles': [conversations[idx]['title'] for idx in cluster_indices[:3]]
-                    })
-            
-            return cluster_topics
-            
-        except Exception as e:
-            logger.error(f"Errore clustering: {e}")
+        # Estrai parole chiave comuni
+        all_text = ' '.join([conv['title'] for conv in conversations]).lower()
+        words = re.findall(r'\b[a-z]{4,15}\b', all_text)
+        
+        # Filtra stop words
+        meaningful_words = [w for w in words if w not in self.stop_words]
+        
+        # Trova parole più frequenti
+        word_freq = Counter(meaningful_words)
+        common_topics = [word for word, count in word_freq.most_common(10) if count > 1]
+        
+        if not common_topics:
             return []
+        
+        # Raggruppa conversazioni per topic simili
+        clusters = []
+        for topic in common_topics[:5]:
+            related_conversations = [
+                conv for conv in conversations 
+                if topic in conv['title'].lower() or topic in conv.get('text', '').lower()
+            ]
+            
+            if related_conversations:
+                clusters.append({
+                    'topic': topic,
+                    'size': len(related_conversations),
+                    'sample_titles': [conv['title'][:60] + '...' for conv in related_conversations[:2]]
+                })
+        
+        return clusters
 
     def analyze_user_sentiment(self, text):
         """Analizza il sentiment del testo (semplificato)"""
-        positive_words = ['love', 'great', 'amazing', 'awesome', 'good', 'excellent', 'happy', 'best']
-        negative_words = ['hate', 'terrible', 'awful', 'bad', 'worst', 'angry', 'sad', 'disappointing']
+        positive_words = ['love', 'great', 'amazing', 'awesome', 'good', 'excellent', 
+                         'happy', 'best', 'fantastic', 'wonderful', 'perfect', 'brilliant']
+        negative_words = ['hate', 'terrible', 'awful', 'bad', 'worst', 'angry', 
+                         'sad', 'disappointing', 'horrible', 'stupid', 'ridiculous']
         
         text_lower = text.lower()
         positive_score = sum(1 for word in positive_words if word in text_lower)
         negative_score = sum(1 for word in negative_words if word in text_lower)
         
-        sentiment = positive_score - negative_score
-        return 'positive' if sentiment > 0 else 'negative' if sentiment < 0 else 'neutral'
+        total_score = positive_score - negative_score
+        
+        if total_score > 2:
+            return 'very positive'
+        elif total_score > 0:
+            return 'positive'
+        elif total_score < -2:
+            return 'very negative'
+        elif total_score < 0:
+            return 'negative'
+        else:
+            return 'neutral'
 
     def process_discussion(self, post, category):
         """Processa una discussione completa per estrarre interessi"""
-        discussion_text = f"{post.title} {post.selftext}"
+        discussion_text = f"{post.title} {getattr(post, 'selftext', '')}"
         
         if len(discussion_text) < self.analysis_config['min_discussion_length']:
             return None
@@ -290,6 +321,7 @@ class AdvancedInterestAnalyzer:
         discussion_data = {
             'id': post.id,
             'title': post.title,
+            'text': discussion_text[:500],  # Salva solo prime 500 caratteri
             'category': category,
             'engagement_score': engagement_score,
             'sentiment': sentiment,
@@ -297,29 +329,39 @@ class AdvancedInterestAnalyzer:
             'momentum': momentum,
             'timestamp': datetime.now().isoformat(),
             'comment_count': getattr(post, 'num_comments', 0),
-            'upvotes': getattr(post, 'score', 0)
+            'upvotes': getattr(post, 'score', 0),
+            'subreddit': getattr(post, 'subreddit', 'unknown')
         }
         
         # Aggiungi al buffer delle conversazioni
         self.conversation_buffer.append(discussion_data)
         
-        # Aggiorna database
-        self.interest_database['conversations'].append(discussion_data)
+        # Aggiorna database (mantieni solo ultime 1000)
+        self.interest_database['conversations'] = self.interest_database.get('conversations', [])[-999:] + [discussion_data]
         
         return discussion_data
 
     def get_interest_insights(self):
         """Genera insights sugli interessi degli utenti"""
         emerging_interests = self.identify_emerging_interests()
-        cluster_analysis = self.cluster_similar_interests(list(self.conversation_buffer))
+        cluster_analysis = self.simple_text_clustering(list(self.conversation_buffer))
         
         # Calcola interessi più popolari
         category_popularity = Counter()
+        category_sentiment = defaultdict(list)
+        
         for conv in self.conversation_buffer:
             category_popularity[conv['category']] += conv['engagement_score']
+            category_sentiment[conv['category']].append(conv['sentiment'])
         
-        popular_interests = [{'category': cat, 'score': score} 
-                           for cat, score in category_popularity.most_common(5)]
+        # Calcola sentiment medio per categoria
+        avg_sentiment = {}
+        for category, sentiments in category_sentiment.items():
+            sentiment_counts = Counter(sentiments)
+            avg_sentiment[category] = dict(sentiment_counts)
+        
+        popular_interests = [{'category': cat, 'score': score, 'sentiment': avg_sentiment.get(cat, {})} 
+                           for cat, score in category_popularity.most_common(8)]
         
         return {
             'emerging_interests': emerging_interests[:5],
@@ -360,7 +402,7 @@ class IntelligentInterestHunter:
             self.reddit = asyncpraw.Reddit(
                 client_id=self.reddit_client_id,
                 client_secret=self.reddit_client_secret,
-                user_agent='IntelligentInterestHunter/1.0'
+                user_agent='IntelligentInterestHunter/2.0'
             )
             logger.info("Reddit connesso per analisi interessi avanzata")
             return True
@@ -374,11 +416,11 @@ class IntelligentInterestHunter:
             current_time = datetime.now()
             analyzed_count = 0
             
-            for subreddit_name in self.analysis_subreddits[:12]:  # Limita per performance
+            for subreddit_name in self.analysis_subreddits[:10]:  # Limita per performance
                 try:
                     subreddit = await self.reddit.subreddit(subreddit_name)
                     
-                    async for post in subreddit.hot(limit=20):
+                    async for post in subreddit.hot(limit=15):
                         if post.id in self.processed_posts:
                             continue
                             
@@ -386,11 +428,11 @@ class IntelligentInterestHunter:
                         hours_ago = (current_time - post_time).total_seconds() / 3600
                         
                         # Analizza solo discussioni recenti e con engagement
-                        if (hours_ago <= 72 and post.num_comments >= 10 and 
-                            post.score >= 20 and not post.stickied):
+                        if (hours_ago <= 96 and post.num_comments >= 5 and 
+                            post.score >= 10 and not post.stickied):
                             
                             # Categorizza il post
-                            category = self.analyzer.categorize_topic(post.title, subreddit_name)
+                            category = self.analyzer.categorize_topic(post.title, str(post.subreddit))
                             
                             # Analisi approfondita della discussione
                             discussion_analysis = self.analyzer.process_discussion(post, category)
@@ -399,21 +441,22 @@ class IntelligentInterestHunter:
                                 analyzed_count += 1
                                 self.processed_posts.add(post.id)
                             
-                        if analyzed_count >= 50:  # Limite per sessione
+                        if analyzed_count >= 30:  # Limite per sessione
                             break
                             
                 except Exception as e:
                     logger.warning(f"Errore analisi r/{subreddit_name}: {e}")
                     continue
                 
-                if analyzed_count >= 50:
+                if analyzed_count >= 30:
                     break
             
             # Genera insights dopo l'analisi
             insights = self.analyzer.get_interest_insights()
             
             logger.info(f"Analizzate {analyzed_count} discussioni per interessi")
-            logger.info(f"Trovati {len(insights['emerging_interests'])} interessi emergenti")
+            if insights['emerging_interests']:
+                logger.info(f"Trovati {len(insights['emerging_interests'])} interessi emergenti")
             
             return insights
             
@@ -424,7 +467,7 @@ class IntelligentInterestHunter:
     def format_interest_report(self, insights):
         """Formatta il report degli interessi"""
         if not insights:
-            return "Nessun dato di interesse analizzato ancora."
+            return "Nessun dato di interesse analizzato ancora. Raccolta dati in corso..."
         
         message = "🧠 **ANALISI INTERESSI UTENTI REDDIT** 🧠\n\n"
         message += f"📊 **Panorama Interessi**\n"
@@ -435,30 +478,37 @@ class IntelligentInterestHunter:
         if insights['emerging_interests']:
             message += "🚀 **INTERESSI EMERGENTI**\n"
             for interest in insights['emerging_interests'][:3]:
-                message += f"• {interest['category'].upper()}: Momentum +{interest['momentum']:.1f}\n"
+                message += f"• {interest['category'].upper()}: +{interest['momentum']:.1f} momentum\n"
             message += "\n"
         
         # Interessi popolari
         if insights['popular_interests']:
-            message += "🔥 **INTERESSI POPOLARI**\n"
-            for interest in insights['popular_interests'][:3]:
-                message += f"• {interest['category']}: Score {interest['score']:.1f}\n"
+            message += "🔥 **INTERESSI PIÙ DISCUSSI**\n"
+            for interest in insights['popular_interests'][:4]:
+                # Calcola sentiment predominante
+                sentiment = interest.get('sentiment', {})
+                if sentiment:
+                    main_sentiment = max(sentiment.items(), key=lambda x: x[1])[0]
+                    sentiment_emoji = '😊' if 'positive' in main_sentiment else '😐' if 'neutral' in main_sentiment else '😞'
+                else:
+                    sentiment_emoji = '😐'
+                
+                message += f"• {interest['category']}: {interest['score']:.1f} engagement {sentiment_emoji}\n"
             message += "\n"
         
         # Cluster di discussione
         if insights['discussion_clusters']:
-            message += "🎯 **TOPIC PRINCIPALI DELLE DISCUSSIONI**\n"
+            message += "🎯 **ARGOMENTI PRINCIPALI**\n"
             for cluster in insights['discussion_clusters'][:2]:
-                message += f"• {' '.join(cluster['top_words'][:5])}\n"
-                message += f"  Esempio: {cluster['sample_titles'][0][:60]}...\n"
+                message += f"• Topic: {cluster['topic']} ({cluster['size']} discussioni)\n"
             message += "\n"
         
+        # Insight finale
         message += "📈 **COSA INTERESSA REALMENTE LE PERSONE:**\n"
         
-        # Insights specifici basati sui dati
         if insights['popular_interests']:
             top_interest = insights['popular_interests'][0]
-            message += f"• Le persone sono più interessate a **{top_interest['category']}**\n"
+            message += f"• **{top_interest['category']}** è l'argomento più discusso\n"
         
         if insights['emerging_interests']:
             emerging = insights['emerging_interests'][0]
@@ -467,6 +517,30 @@ class IntelligentInterestHunter:
         message += f"\n🔄 Prossima analisi: 15 minuti"
         
         return message
+
+    async def send_to_telegram(self, message):
+        """Invia il report via Telegram"""
+        if not self.telegram_token or not self.active_chats:
+            return False
+        
+        success_count = 0
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            for chat_id in self.active_chats:
+                try:
+                    url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+                    payload = {
+                        'chat_id': chat_id,
+                        'text': message,
+                        'disable_web_page_preview': True
+                    }
+                    
+                    async with session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            success_count += 1
+                except Exception as e:
+                    logger.error(f"Errore invio Telegram: {e}")
+        
+        return success_count > 0
 
     async def run_interest_analysis(self):
         """Esegue l'analisi continua degli interessi"""
@@ -487,20 +561,21 @@ class IntelligentInterestHunter:
                 
                 insights = await self.deep_analyze_interests()
                 
-                if insights:
+                if insights and insights['total_conversations_analyzed'] > 0:
                     report = self.format_interest_report(insights)
                     logger.info("Analisi interessi completata")
                     
                     # Salva periodicamente
-                    if analysis_count % 10 == 0:
+                    if analysis_count % 5 == 0:
                         self.analyzer.save_interests()
+                        logger.info("Dati interessi salvati")
                     
                     # Invia report se ci sono chat attive
-                    if self.active_chats and self.telegram_token:
+                    if self.telegram_token:
                         await self.send_to_telegram(report)
                 
                 # Pulizia periodica
-                if len(self.processed_posts) > 2000:
+                if len(self.processed_posts) > 1000:
                     self.processed_posts.clear()
                     logger.info("Pulizia post processati effettuata")
                 
@@ -528,4 +603,5 @@ async def main():
 if __name__ == "__main__":
     logger.info("Intelligent Interest Hunter v2.0")
     logger.info("Analisi avanzata interessi utenti da discussioni Reddit")
+    logger.info("Nessuna dipendenza ML esterna - Solo Python nativo")
     asyncio.run(main())
