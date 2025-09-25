@@ -5,288 +5,84 @@ import json
 import os
 import logging
 from datetime import datetime, timedelta
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 import re
 
 # Configurazione logging
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('interest_analyzer.log')]
+    handlers=[logging.StreamHandler(), logging.FileHandler('topic_bot.log')]
 )
 logger = logging.getLogger(__name__)
 
-# ===== ADVANCED INTEREST ANALYZER =====
-class AdvancedInterestAnalyzer:
+# ===== SIMPLE TOPIC FINDER =====
+class SimpleTopicFinder:
     def __init__(self):
-        self.interests_file = 'user_interests.json'
-        self.trends_file = 'interest_trends.json'
+        self.topics_file = 'hot_topics.json'
+        self.processed_posts = set()
         
-        self.interest_database = self.load_interests()
-        self.conversation_buffer = deque(maxlen=200)
-        self.interest_trends = defaultdict(lambda: {'count': 0, 'momentum': 0, 'history': [], 'specific_topics': []})
-        
-        self.analysis_config = {
-            'min_discussion_length': 30,
-            'min_comments_threshold': 3,
-            'engagement_weight': 2.0,
-            'emerging_threshold': 0.1
+        # Liste di parole comuni da ignorare
+        self.stop_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+            'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may',
+            'might', 'must', 'can', 'what', 'when', 'where', 'why', 'how', 'which', 'who', 'whom'
         }
         
-        # Categorie più specifiche con keyword dettagliate
-        self.interest_categories = {
-            'technology': {
-                'keywords': ['ai', 'artificial intelligence', 'machine learning', 'programming', 'software', 
-                           'hardware', 'startup', 'innovation', 'digital', 'tech', 'coding', 'developer',
-                           'app', 'website', 'cloud', 'data science', 'cybersecurity', 'blockchain', 'computer'],
-                'subtopics': ['AI', 'programmazione', 'cybersecurity', 'blockchain', 'cloud computing', 'mobile app']
-            },
-            'gaming': {
-                'keywords': ['game', 'gaming', 'playstation', 'xbox', 'nintendo', 'steam', 'esports',
-                           'video game', 'gamer', 'multiplayer', 'singleplayer', 'release', 'update', 'console'],
-                'subtopics': ['PS5', 'Xbox Series X', 'Nintendo Switch', 'PC gaming', 'eSports', 'game release']
-            },
-            'entertainment': {
-                'keywords': ['movie', 'film', 'tv show', 'netflix', 'youtube', 'music', 'spotify',
-                           'celebrity', 'actor', 'director', 'album', 'song', 'streaming', 'entertainment'],
-                'subtopics': ['Netflix series', 'YouTube creators', 'music album', 'film release', 'celebrity news']
-            },
-            'lifestyle': {
-                'keywords': ['fitness', 'workout', 'diet', 'nutrition', 'travel', 'food', 'cooking',
-                           'fashion', 'beauty', 'home', 'decor', 'gardening', 'pet', 'hobby', 'lifestyle'],
-                'subtopics': ['fitness routine', 'travel destinations', 'recipes', 'fashion trends', 'home decor']
-            },
-            'science': {
-                'keywords': ['science', 'research', 'discovery', 'space', 'physics', 'biology',
-                           'chemistry', 'astronomy', 'innovation', 'study', 'scientist', 'experiment'],
-                'subtopics': ['space exploration', 'scientific discovery', 'climate research', 'medical breakthrough']
-            },
-            'business': {
-                'keywords': ['business', 'startup', 'entrepreneur', 'marketing', 'sales', 'company',
-                           'industry', 'market', 'economy', 'investment', 'strategy', 'profit'],
-                'subtopics': ['startup funding', 'market trends', 'business strategy', 'investment opportunities']
-            },
-            'politica': {
-                'keywords': ['politics', 'government', 'election', 'policy', 'law', 'democrat',
-                           'republican', 'parliament', 'senate', 'vote', 'political', 'policy'],
-                'subtopics': ['elections', 'government policy', 'political scandal', 'international relations']
-            },
-            'social': {
-                'keywords': ['social', 'society', 'community', 'culture', 'relationship', 'friendship',
-                           'network', 'communication', 'media', 'social media', 'connection', 'social'],
-                'subtopics': ['social media trends', 'community issues', 'relationship advice', 'cultural topics']
-            },
-            'life': {
-                'keywords': ['life', 'personal', 'experience', 'story', 'advice', 'help', 'support',
-                           'mental health', 'self improvement', 'motivation', 'happiness', 'life'],
-                'subtopics': ['mental health', 'personal growth', 'life advice', 'self improvement tips']
-            },
-            'mercato lavoro': {
-                'keywords': ['job', 'career', 'work', 'employment', 'hire', 'recruitment', 'salary',
-                           'interview', 'resume', 'career change', 'remote work', 'promotion', 'work'],
-                'subtopics': ['remote work', 'job market', 'career advice', 'salary negotiation', 'interview tips']
-            }
+        # Categorie semplici per classificazione
+        self.categories = {
+            'technology': ['ai', 'tech', 'programming', 'software', 'computer', 'code', 'app', 'digital'],
+            'gaming': ['game', 'gaming', 'playstation', 'xbox', 'nintendo', 'steam', 'console'],
+            'entertainment': ['movie', 'film', 'tv', 'music', 'netflix', 'youtube', 'celebrity'],
+            'life': ['life', 'relationship', 'advice', 'personal', 'story', 'experience'],
+            'politics': ['politics', 'government', 'election', 'policy', 'law', 'vote'],
+            'work': ['job', 'work', 'career', 'salary', 'interview', 'employment'],
+            'science': ['science', 'research', 'study', 'discovery', 'space', 'climate']
         }
 
-    def load_interests(self):
-        try:
-            if os.path.exists(self.interests_file):
-                with open(self.interests_file, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            logger.warning(f"Errore caricamento interessi: {e}")
-        return {'conversations': [], 'interest_patterns': {}}
-
-    def save_interests(self):
-        try:
-            with open(self.interests_file, 'w') as f:
-                json.dump(self.interest_database, f, indent=2)
-        except Exception as e:
-            logger.error(f"Errore salvataggio interessi: {e}")
-
-    def extract_specific_topics(self, title, content):
-        """Estrae topic specifici dal titolo e contenuto"""
-        text = f"{title} {content}".lower()
+    def extract_main_topic(self, title):
+        """Estrae l'argomento principale dal titolo"""
+        # Pulisci il titolo e converti in minuscolo
+        title_clean = re.sub(r'[^\w\s]', ' ', title).lower()
+        words = title_clean.split()
         
-        # Cerca frasi chiave specifiche
-        specific_phrases = []
-        
-        # Pattern per frasi importanti (domande, affermazioni forti)
-        question_patterns = [
-            r'how to (.+?)\?', r'what is (.+?)\?', r'why does (.+?)\?',
-            r'best way to (.+?)', r'tips for (.+?)', r'guide to (.+?)'
+        # Filtra parole significative (lunghe > 3 caratteri, non stop words)
+        meaningful_words = [
+            word for word in words 
+            if len(word) > 3 and word not in self.stop_words
         ]
         
-        for pattern in question_patterns:
-            matches = re.findall(pattern, text)
-            specific_phrases.extend(matches)
+        if not meaningful_words:
+            return "general"
         
-        # Estrai nomi propri e termini tecnici (parole con maiuscole nel titolo originale)
-        proper_nouns = re.findall(r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', title)
-        specific_phrases.extend(proper_nouns)
+        # Conta le parole più frequenti
+        word_counts = Counter(meaningful_words)
+        main_word = word_counts.most_common(1)[0][0]
         
-        # Estrai hashtag e termini tra virgolette
-        quoted_terms = re.findall(r'"([^"]*)"', text)
-        specific_phrases.extend(quoted_terms)
-        
-        # Filtra e pulisci i risultati
-        cleaned_phrases = []
-        for phrase in specific_phrases:
-            phrase = phrase.strip()
-            if len(phrase) > 3 and len(phrase) < 50:  # Lunghezza ragionevole
-                cleaned_phrases.append(phrase)
-        
-        return cleaned_phrases[:5]  # Massimo 5 topic specifici
+        return main_word
 
-    def categorize_topic_detailed(self, title, content, subreddit):
-        """Categorizzazione dettagliata con topic specifici"""
-        text_lower = f"{title} {content} {subreddit}".lower()
-        category_scores = defaultdict(int)
-        specific_topics = self.extract_specific_topics(title, content)
+    def categorize_topic(self, topic_word, title):
+        """Classifica l'argomento in una categoria"""
+        title_lower = title.lower()
         
-        # Punteggio per categoria principale
-        for category, data in self.interest_categories.items():
-            for keyword in data['keywords']:
-                if keyword in text_lower:
-                    # Punteggio più alto per match esatti
-                    if f" {keyword} " in f" {text_lower} ":
-                        category_scores[category] += 3
-                    else:
-                        category_scores[category] += 1
+        for category, keywords in self.categories.items():
+            if topic_word in keywords:
+                return category
+            # Controlla anche nel titolo completo
+            for keyword in keywords:
+                if keyword in title_lower:
+                    return category
         
-        if not category_scores:
-            return 'general', specific_topics, []
-        
-        best_category = max(category_scores.items(), key=lambda x: x[1])
-        best_category_name = best_category[0] if best_category[1] > 0 else 'general'
-        
-        # Trova subtopic specifici per la categoria
-        category_subtopics = []
-        if best_category_name in self.interest_categories:
-            for subtopic in self.interest_categories[best_category_name]['subtopics']:
-                if subtopic.lower() in text_lower:
-                    category_subtopics.append(subtopic)
-        
-        return best_category_name, specific_topics, category_subtopics
+        return "general"
 
-    def analyze_conversation_depth(self, post):
-        if not hasattr(post, 'num_comments') or post.num_comments < self.analysis_config['min_comments_threshold']:
-            return 0
-        
-        engagement_score = min(post.num_comments / max(1, post.score), 10)
-        
-        # Bonus per discussioni lunghe
-        text_length = len(getattr(post, 'selftext', ''))
-        if text_length > 500:
-            engagement_score *= 1.5
-        elif text_length > 200:
-            engagement_score *= 1.2
-        
-        return engagement_score
+    def calculate_popularity_score(self, post):
+        """Calcola un punteggio di popolarità semplice"""
+        score = post.score + (post.num_comments * 2)  # Commenti pesano il doppio
+        return score
 
-    def calculate_interest_momentum(self, category, new_engagement, specific_topics):
-        current_trend = self.interest_trends[category]
-        new_count = current_trend['count'] * 0.9 + new_engagement
-        momentum = new_engagement - (current_trend['count'] * 0.8)
-        
-        # Aggiorna i topic specifici
-        updated_topics = current_trend.get('specific_topics', [])
-        for topic in specific_topics:
-            found = False
-            for existing_topic in updated_topics:
-                if existing_topic['topic'] == topic:
-                    existing_topic['count'] += 1
-                    existing_topic['last_seen'] = datetime.now().isoformat()
-                    found = True
-                    break
-            if not found:
-                updated_topics.append({
-                    'topic': topic,
-                    'count': 1,
-                    'first_seen': datetime.now().isoformat(),
-                    'last_seen': datetime.now().isoformat()
-                })
-        
-        # Mantieni solo i topic più recenti e frequenti
-        updated_topics.sort(key=lambda x: x['count'], reverse=True)
-        updated_topics = updated_topics[:10]  # Massimo 10 topic
-        
-        self.interest_trends[category] = {
-            'count': new_count,
-            'momentum': momentum,
-            'history': current_trend['history'][-29:] + [{'count': new_count, 'timestamp': datetime.now().isoformat()}],
-            'specific_topics': updated_topics
-        }
-        
-        return momentum
-
-    def identify_emerging_interests(self):
-        emerging = []
-        for category, trend in self.interest_trends.items():
-            if len(trend['history']) >= 2 and trend['momentum'] > 1.0:  # Soglia più alta
-                # Trova il topic specifico più popolare
-                top_topic = None
-                if trend['specific_topics']:
-                    top_topic = max(trend['specific_topics'], key=lambda x: x['count'])
-                
-                emerging.append({
-                    'category': category,
-                    'momentum': trend['momentum'],
-                    'strength': trend['count'],
-                    'specific_topic': top_topic,
-                    'all_topics': trend['specific_topics'][:3],  # Top 3 topic
-                    'trend': 'emerging'
-                })
-        
-        return sorted(emerging, key=lambda x: x['momentum'], reverse=True)
-
-    def process_discussion(self, post, category, specific_topics, subtopics):
-        discussion_text = f"{post.title} {getattr(post, 'selftext', '')}"
-        
-        if len(discussion_text) < self.analysis_config['min_discussion_length']:
-            return None
-        
-        engagement_score = self.analyze_conversation_depth(post)
-        momentum = self.calculate_interest_momentum(category, engagement_score, specific_topics + subtopics)
-        
-        discussion_data = {
-            'id': post.id,
-            'title': post.title,
-            'category': category,
-            'specific_topics': specific_topics,
-            'subtopics': subtopics,
-            'engagement_score': engagement_score,
-            'momentum': momentum,
-            'timestamp': datetime.now().isoformat(),
-            'comment_count': getattr(post, 'num_comments', 0),
-            'upvotes': getattr(post, 'score', 0),
-            'subreddit': str(getattr(post, 'subreddit', 'unknown'))
-        }
-        
-        self.conversation_buffer.append(discussion_data)
-        self.interest_database['conversations'] = self.interest_database.get('conversations', [])[-199:] + [discussion_data]
-        
-        return discussion_data
-
-    def get_interest_insights(self):
-        emerging_interests = self.identify_emerging_interests()
-        
-        category_popularity = Counter()
-        for conv in self.conversation_buffer:
-            category_popularity[conv['category']] += conv['engagement_score']
-        
-        popular_interests = [{'category': cat, 'score': score} 
-                           for cat, score in category_popularity.most_common(5)]
-        
-        return {
-            'emerging_interests': emerging_interests,
-            'popular_interests': popular_interests,
-            'total_conversations_analyzed': len(self.conversation_buffer),
-            'timestamp': datetime.now().isoformat()
-        }
-
-# ===== INTELLIGENT INTEREST HUNTER =====
-class IntelligentInterestHunter:
+# ===== REDDIT TOPIC BOT =====
+class RedditTopicBot:
     def __init__(self):
         self.reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
         self.reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
@@ -296,149 +92,145 @@ class IntelligentInterestHunter:
         if not all([self.reddit_client_id, self.reddit_client_secret]):
             raise ValueError("Credenziali Reddit mancanti!")
         
-        self.analyzer = AdvancedInterestAnalyzer()
-        self.processed_posts = set()
+        self.topic_finder = SimpleTopicFinder()
+        self.hot_topics = defaultdict(list)
         
-        self.analysis_subreddits = [
+        # Subreddit popolari per analisi
+        self.subreddits = [
             'all', 'popular', 'askreddit', 'technology', 'gaming', 'science',
             'worldnews', 'politics', 'personalfinance', 'relationships',
-            'jobs', 'business', 'lifeadvice', 'selfimprovement', 'explainlikeimfive',
-            'todayilearned', 'youshouldknow', 'lifehacks'
+            'jobs', 'lifeadvice', 'explainlikeimfive', 'todayilearned'
         ]
-        
-        self.stats = {
-            'total_analyses': 0,
-            'total_posts_analyzed': 0,
-            'last_alert_sent': None
-        }
 
     async def initialize_reddit(self):
         try:
             self.reddit = asyncpraw.Reddit(
                 client_id=self.reddit_client_id,
                 client_secret=self.reddit_client_secret,
-                user_agent='IntelligentInterestHunter/3.0'
+                user_agent='RedditTopicBot/1.0'
             )
-            logger.info("Reddit connesso per analisi interessi avanzata")
+            logger.info("Reddit connesso con successo")
             return True
         except Exception as e:
             logger.error(f"Errore connessione Reddit: {e}")
             return False
 
-    async def deep_analyze_interests(self):
+    async def find_hottest_topic(self):
+        """Trova l'argomento più discusso in questo momento"""
         try:
-            current_time = datetime.now()
-            analyzed_count = 0
+            topic_scores = Counter()
+            topic_details = defaultdict(list)
             
-            for subreddit_name in self.analysis_subreddits[:10]:
+            for subreddit_name in self.subreddits[:8]:
                 try:
                     subreddit = await self.reddit.subreddit(subreddit_name)
                     
                     async for post in subreddit.hot(limit=15):
-                        if post.id in self.processed_posts:
+                        if post.id in self.topic_finder.processed_posts:
                             continue
                             
+                        # Filtra post recenti e popolari
                         post_time = datetime.fromtimestamp(post.created_utc)
-                        hours_ago = (current_time - post_time).total_seconds() / 3600
+                        hours_ago = (datetime.now() - post_time).total_seconds() / 3600
                         
-                        if (hours_ago <= 96 and post.num_comments >= 3 and 
-                            post.score >= 5 and not post.stickied):
+                        if hours_ago <= 24 and post.score >= 10:
+                            # Estrai argomento principale
+                            main_topic = self.topic_finder.extract_main_topic(post.title)
+                            category = self.topic_finder.categorize_topic(main_topic, post.title)
+                            popularity = self.topic_finder.calculate_popularity_score(post)
                             
-                            # Analisi DETTAGLIATA con topic specifici
-                            category, specific_topics, subtopics = self.analyzer.categorize_topic_detailed(
-                                post.title, 
-                                getattr(post, 'selftext', ''), 
-                                str(post.subreddit)
-                            )
+                            # Aggiorna punteggi
+                            topic_scores[main_topic] += popularity
+                            topic_details[main_topic].append({
+                                'title': post.title,
+                                'subreddit': subreddit_name,
+                                'score': post.score,
+                                'comments': post.num_comments,
+                                'category': category
+                            })
                             
-                            discussion_analysis = self.analyzer.process_discussion(
-                                post, category, specific_topics, subtopics
-                            )
-                            
-                            if discussion_analysis:
-                                analyzed_count += 1
-                                self.processed_posts.add(post.id)
-                                
-                                # Log dei topic specifici trovati
-                                if specific_topics:
-                                    logger.info(f"Topic specifici trovati: {specific_topics[:2]}")
-                            
-                        if analyzed_count >= 25:
-                            break
+                            self.topic_finder.processed_posts.add(post.id)
                             
                 except Exception as e:
-                    logger.warning(f"Errore analisi r/{subreddit_name}: {e}")
+                    logger.warning(f"Errore in r/{subreddit_name}: {e}")
                     continue
-                
-                if analyzed_count >= 25:
-                    break
             
-            insights = self.analyzer.get_interest_insights()
-            self.stats['total_analyses'] += 1
-            self.stats['total_posts_analyzed'] += analyzed_count
+            if not topic_scores:
+                return None
             
-            logger.info(f"Analisi #{self.stats['total_analyses']}: {analyzed_count} post analizzati")
-            if insights['emerging_interests']:
-                for trend in insights['emerging_interests']:
-                    logger.info(f"Trend emergente: {trend['category']} - Topic: {trend.get('specific_topic', {}).get('topic', 'N/A')}")
+            # Trova l'argomento più popolare
+            hottest_topic, total_score = topic_scores.most_common(1)[0]
+            topic_data = topic_details[hottest_topic]
             
-            return insights
+            # Calcola statistiche
+            total_posts = len(topic_data)
+            total_comments = sum(t['comments'] for t in topic_data)
+            avg_score = sum(t['score'] for t in topic_data) / total_posts
+            
+            # Trova la categoria predominante
+            categories = Counter(t['category'] for t in topic_data)
+            main_category = categories.most_common(1)[0][0]
+            
+            result = {
+                'topic': hottest_topic,
+                'total_score': total_score,
+                'total_posts': total_posts,
+                'total_comments': total_comments,
+                'avg_score': round(avg_score, 1),
+                'main_category': main_category,
+                'example_posts': [t['title'] for t in topic_data[:3]],  # Prime 3 discussioni
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            logger.info(f"🔥 Trovato argomento caldo: {hottest_topic} (score: {total_score})")
+            return result
             
         except Exception as e:
-            logger.error(f"Errore analisi interessi: {e}")
+            logger.error(f"Errore ricerca argomenti: {e}")
             return None
 
-    def format_alert_message(self, insights, analysis_number):
-        if not insights or not insights['emerging_interests']:
-            return None
+    def format_topic_alert(self, topic_data):
+        """Formatta l'alert per l'argomento più discusso"""
+        if not topic_data:
+            return "Nessun argomento popolare trovato al momento."
         
-        emerging = insights['emerging_interests'][0]
+        emoji_map = {
+            'technology': '💻', 'gaming': '🎮', 'entertainment': '🎬',
+            'life': '❤️', 'politics': '🏛️', 'work': '💼', 'science': '🔬',
+            'general': '🔥'
+        }
         
-        # Costruisci messaggio DETTAGLIATO con topic specifici
-        message = "🚨 **TREND EMERGENTE TROVATO!** 🚨\n\n"
-        message += f"📈 **{emerging['category'].upper()}** sta esplodendo!\n\n"
+        emoji = emoji_map.get(topic_data['main_category'], '🔥')
         
-        # Aggiungi topic specifico se disponibile
-        if emerging.get('specific_topic'):
-            specific_topic = emerging['specific_topic']
-            message += f"🎯 **Topic Specifico:** {specific_topic['topic']}\n"
-            message += f"📊 **Menzioni:** {specific_topic['count']} volte\n\n"
+        message = f"{emoji} **ARGOMENTO PIÙ DISCUSSO SU REDDIT** {emoji}\n\n"
+        message += f"🎯 **Tema Principale:** {topic_data['topic'].upper()}\n"
+        message += f"📊 **Categoria:** {topic_data['main_category']}\n\n"
         
-        # Aggiungi altri topic rilevanti
-        if emerging.get('all_topics'):
-            message += "🔥 **Altri Topic Correlati:**\n"
-            for topic in emerging['all_topics'][:3]:
-                message += f"• {topic['topic']} ({topic['count']} mentions)\n"
-            message += "\n"
+        message += f"📈 **Statistiche:**\n"
+        message += f"• Punteggio Popolarità: {topic_data['total_score']}\n"
+        message += f"• Discussioni Trovate: {topic_data['total_posts']}\n"
+        message += f"• Commenti Totali: {topic_data['total_comments']}\n"
+        message += f"• Score Medio: {topic_data['avg_score']}\n\n"
         
-        message += f"📈 **Metriche Trend:**\n"
-        message += f"• Momentum: +{emerging['momentum']:.1f}\n"
-        message += f"• Forza Engagement: {emerging['strength']:.1f}\n"
-        message += f"• Post analizzati: {insights['total_conversations_analyzed']}\n\n"
+        message += f"💬 **Esempi di Discussioni:**\n"
+        for i, post_title in enumerate(topic_data['example_posts'], 1):
+            shortened_title = post_title[:80] + "..." if len(post_title) > 80 else post_title
+            message += f"{i}. {shortened_title}\n"
         
-        # Aggiungi contesto con classificica interessi
-        if insights['popular_interests']:
-            message += "🏆 **CLASSIFICA INTERESSI ATUALI:**\n"
-            for i, interest in enumerate(insights['popular_interests'][:3], 1):
-                message += f"{i}. {interest['category']} ({interest['score']:.1f})\n"
-        
-        message += f"\n⏰ Analisi #{analysis_number} - {datetime.now().strftime('%H:%M %d/%m')}"
+        message += f"\n⏰ Aggiornamento: {datetime.now().strftime('%H:%M - %d/%m/%Y')}"
         
         return message
 
-    async def send_telegram_message(self, message, is_alert=False):
-        if not self.telegram_token:
-            logger.warning("Token Telegram non configurato - skip invio")
-            return False
-        
-        chat_id = self.telegram_chat_id
-        if not chat_id:
+    async def send_telegram_alert(self, message):
+        """Invia l'alert via Telegram"""
+        if not self.telegram_token or not self.telegram_chat_id:
+            logger.info("Telegram non configurato - salto invio")
             return False
         
         try:
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
             payload = {
-                'chat_id': chat_id,
+                'chat_id': self.telegram_chat_id,
                 'text': message,
                 'parse_mode': 'Markdown',
                 'disable_web_page_preview': True
@@ -447,71 +239,80 @@ class IntelligentInterestHunter:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async with session.post(url, json=payload) as response:
                     if response.status == 200:
-                        if is_alert:
-                            self.stats['last_alert_sent'] = datetime.now().strftime('%H:%M %d/%m')
-                        logger.info(f"✅ Messaggio Telegram inviato")
+                        logger.info("✅ Alert Telegram inviato con successo!")
                         return True
                     else:
-                        error_text = await response.text()
-                        logger.error(f"❌ Errore Telegram {response.status}: {error_text}")
+                        logger.error(f"❌ Errore Telegram: {response.status}")
                         return False
                         
         except Exception as e:
             logger.error(f"❌ Errore invio Telegram: {e}")
             return False
 
-    async def run_interest_analysis(self):
-        logger.info("Avvio Intelligent Interest Hunter v3.0")
+    async def run_bot(self):
+        """Esegue il bot principale"""
+        logger.info("Avvio Reddit Topic Bot")
+        logger.info("Ricerca argomento più discusso ogni 15 minuti")
         
         if not await self.initialize_reddit():
             return
         
+        # Messaggio di avvio
         if self.telegram_token:
-            await self.send_telegram_message("🤖 **Bot avviato!**\nInizio analisi dettagliata interessi Reddit...")
+            await self.send_telegram_alert("🤖 **Reddit Topic Bot avviato!**\nInizio monitoraggio argomenti più discussi...")
         
-        logger.info("Interest Hunter operativo!")
+        logger.info("Bot operativo!")
+        
+        analysis_count = 0
         
         while True:
             try:
-                insights = await self.deep_analyze_interests()
+                analysis_count += 1
+                logger.info(f"Analisi #{analysis_count} in corso...")
                 
-                if insights:
-                    # INVIO ALERT DETTAGLIATO
-                    if insights['emerging_interests']:
-                        alert_message = self.format_alert_message(insights, self.stats['total_analyses'])
-                        if alert_message and self.telegram_token:
-                            success = await self.send_telegram_message(alert_message, is_alert=True)
-                            if success:
-                                logger.info("🚨 Alert trend emergente INVIAO con topic specifici!")
+                # Trova l'argomento più discusso
+                hottest_topic = await self.find_hottest_topic()
+                
+                if hottest_topic:
+                    # Formatta e invia l'alert
+                    alert_message = self.format_topic_alert(hottest_topic)
                     
-                    # Salva dati periodicamente
-                    if self.stats['total_analyses'] % 5 == 0:
-                        self.analyzer.save_interests()
+                    if self.telegram_token:
+                        await self.send_telegram_alert(alert_message)
+                    
+                    # Log dei risultati
+                    logger.info(f"📊 Risultati analisi #{analysis_count}:")
+                    logger.info(f"   Topic: {hottest_topic['topic']}")
+                    logger.info(f"   Categoria: {hottest_topic['main_category']}")
+                    logger.info(f"   Punteggio: {hottest_topic['total_score']}")
+                    logger.info(f"   Discussioni: {hottest_topic['total_posts']}")
                 
                 # Pulizia periodica
-                if len(self.processed_posts) > 500:
-                    self.processed_posts.clear()
+                if analysis_count % 10 == 0:
+                    self.topic_finder.processed_posts.clear()
+                    logger.info("🧹 Pulizia post processati effettuata")
                 
-                await asyncio.sleep(900)  # 15 minuti
+                # Attesa 15 minuti
+                await asyncio.sleep(900)
                 
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                logger.error(f"Errore main loop: {e}")
-                await asyncio.sleep(300)
+                logger.error(f"Errore durante l'analisi: {e}")
+                await asyncio.sleep(300)  # Riprova dopo 5 minuti
         
-        self.analyzer.save_interests()
         if hasattr(self, 'reddit'):
             await self.reddit.close()
 
+# Esegui il bot
 async def main():
     try:
-        hunter = IntelligentInterestHunter()
-        await hunter.run_interest_analysis()
+        bot = RedditTopicBot()
+        await bot.run_bot()
     except Exception as e:
         logger.error(f"Errore critico: {e}")
 
 if __name__ == "__main__":
-    logger.info("Intelligent Interest Hunter v3.0")
-    logger.info("Analisi TOPIC SPECIFICI da discussioni Reddit")
+    logger.info("Reddit Topic Bot v1.0")
+    logger.info("Monitoraggio argomenti più discussi su Reddit")
     asyncio.run(main())
