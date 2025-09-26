@@ -12,6 +12,9 @@ import re
 import sqlite3
 import hashlib
 from pathlib import Path
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
+import time
 
 # Configurazione logging professionale
 logging.basicConfig(
@@ -31,14 +34,17 @@ class TrendData:
     topic: str
     category: str
     total_score: int
-    velocity_score: float  # Velocità di crescita
+    velocity_score: float
     post_count: int
     comment_count: int
     avg_engagement: float
     top_posts: List[Dict]
     subreddits: List[str]
     timestamp: datetime
-    confidence_level: float  # Livello di confidenza della previsione
+    confidence_level: float
+    sentiment_score: float
+    discussion_quality: float
+    controversy_score: float
 
 @dataclass
 class PostMetrics:
@@ -51,792 +57,595 @@ class PostMetrics:
     created_utc: float
     upvote_ratio: float
     engagement_rate: float
+    comment_velocity: float
+    awards: int
+    sentiment: float
 
-class DatabaseManager:
-    """Gestisce il database per lo storico delle tendenze"""
-    
-    def __init__(self, db_path: str = "reddit_trends.db"):
-        self.db_path = db_path
-        self.init_database()
-    
-    def init_database(self):
-        """Inizializza il database"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS trends (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        topic TEXT NOT NULL,
-                        category TEXT,
-                        total_score INTEGER,
-                        velocity_score REAL,
-                        post_count INTEGER,
-                        comment_count INTEGER,
-                        confidence_level REAL,
-                        timestamp DATETIME,
-                        data_json TEXT
-                    )
-                ''')
-                
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS processed_posts (
-                        post_id TEXT PRIMARY KEY,
-                        processed_at DATETIME,
-                        topic TEXT
-                    )
-                ''')
-                
-                # Indici per performance
-                conn.execute('CREATE INDEX IF NOT EXISTS idx_trends_timestamp ON trends(timestamp)')
-                conn.execute('CREATE INDEX IF NOT EXISTS idx_trends_topic ON trends(topic)')
-                
-                logger.info("Database inizializzato correttamente")
-        except Exception as e:
-            logger.error(f"Errore inizializzazione database: {e}")
-    
-    def save_trend(self, trend: TrendData):
-        """Salva una tendenza nel database"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute('''
-                    INSERT INTO trends 
-                    (topic, category, total_score, velocity_score, post_count, 
-                     comment_count, confidence_level, timestamp, data_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    trend.topic, trend.category, trend.total_score, 
-                    trend.velocity_score, trend.post_count, trend.comment_count,
-                    trend.confidence_level, trend.timestamp, 
-                    json.dumps(trend.top_posts, ensure_ascii=False)
-                ))
-        except Exception as e:
-            logger.error(f"Errore salvataggio tendenza: {e}")
-    
-    def get_historical_trends(self, hours_back: int = 24) -> List[Dict]:
-        """Recupera le tendenze storiche"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute('''
-                    SELECT * FROM trends 
-                    WHERE timestamp > datetime('now', '-{} hours')
-                    ORDER BY timestamp DESC
-                '''.format(hours_back))
-                
-                columns = [description[0] for description in cursor.description]
-                return [dict(zip(columns, row)) for row in cursor.fetchall()]
-        except Exception as e:
-            logger.error(f"Errore recupero storico: {e}")
-            return []
+@dataclass
+class CommentAnalysis:
+    """Analisi dei commenti per una discussione"""
+    total_comments: int
+    unique_authors: int
+    avg_comment_score: float
+    comment_velocity: float
+    sentiment_distribution: Dict[str, float]
+    controversial_comments: int
+    depth_distribution: Dict[int, int]
+    top_keywords: List[Tuple[str, int]]
 
-class AdvancedTopicAnalyzer:
-    """Analizzatore avanzato per l'identificazione dei topic"""
+class DiscussionAnalyzer:
+    """Analizzatore avanzato delle discussioni e commenti"""
     
     def __init__(self):
+        self.sia = SentimentIntensityAnalyzer()
+        self.discussion_indicators = {
+            'question_patterns': [
+                r'\b(why|how|what|when|where|who|does|is|are|can)\b.*\?',
+                r'opinion.*\?',
+                r'thoughts.*\?',
+                r'advice.*\?'
+            ],
+            'debate_indicators': [
+                r'\b(agree|disagree|argument|debate|discuss|opinion)\b',
+                r'change my mind',
+                r'cmv\b',
+                r'unpopular opinion'
+            ],
+            'emotional_indicators': [
+                r'\b(wow|amazing|shocking|crazy|unbelievable|hate|love)\b',
+                r'!\s*$',
+                r'\?{2,}'
+            ]
+        }
+    
+    async def analyze_comments(self, post) -> CommentAnalysis:
+        """Analizza i commenti di un post per valutare la qualità della discussione"""
+        try:
+            comments_data = {
+                'total': 0,
+                'authors': set(),
+                'scores': [],
+                'sentiments': [],
+                'controversial': 0,
+                'depths': defaultdict(int),
+                'timestamps': []
+            }
+            
+            comment_keywords = Counter()
+            
+            # Analizza i primi 100 commenti per performance
+            post.comments.replace_more(limit=5)  # Limita i "load more comments"
+            comments = post.comments.list()
+            
+            if not comments:
+                return self._create_empty_analysis()
+            
+            for comment in comments[:200]:  # Limita per performance
+                comments_data['total'] += 1
+                comments_data['authors'].add(comment.author.name if comment.author else 'deleted')
+                comments_data['scores'].append(comment.score)
+                comments_data['timestamps'].append(comment.created_utc)
+                
+                # Analisi profondità
+                depth = 0
+                parent = comment.parent()
+                while parent and hasattr(parent, 'parent'):
+                    depth += 1
+                    parent = parent.parent()
+                comments_data['depths'][depth] += 1
+                
+                # Commenti controversi (score negativo o molto divisivo)
+                if comment.score < 0 or comment.controversiality > 0:
+                    comments_data['controversial'] += 1
+                
+                # Analisi sentiment e keywords
+                if comment.body:
+                    sentiment = self.sia.polarity_scores(comment.body)
+                    comments_data['sentiments'].append(sentiment['compound'])
+                    
+                    # Estrai keywords dai commenti
+                    keywords = self._extract_comment_keywords(comment.body)
+                    comment_keywords.update(keywords)
+            
+            return self._compile_analysis(comments_data, comment_keywords)
+            
+        except Exception as e:
+            logger.warning(f"Errore analisi commenti: {e}")
+            return self._create_empty_analysis()
+    
+    def _extract_comment_keywords(self, text: str) -> List[str]:
+        """Estrae keywords significative dai commenti"""
+        # Rimuovi URL e caratteri speciali
+        clean_text = re.sub(r'http\S+', '', text)
+        clean_text = re.sub(r'[^\w\s]', ' ', clean_text)
+        
+        words = clean_text.lower().split()
+        # Filtra parole significative
+        meaningful_words = [
+            word for word in words 
+            if len(word) > 3 and word not in self._get_stopwords()
+        ]
+        
+        return meaningful_words[:5]  # Limita a 5 keywords per commento
+    
+    def _get_stopwords(self) -> Set[str]:
+        """Lista di stopwords per l'analisi commenti"""
+        return {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'this', 'that', 'these', 'those', 'is', 'are',
+            'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do'
+        }
+    
+    def _create_empty_analysis(self) -> CommentAnalysis:
+        """Crea un'analisi vuota per post senza commenti"""
+        return CommentAnalysis(
+            total_comments=0,
+            unique_authors=0,
+            avg_comment_score=0,
+            comment_velocity=0,
+            sentiment_distribution={'positive': 0, 'neutral': 0, 'negative': 0},
+            controversial_comments=0,
+            depth_distribution={0: 0},
+            top_keywords=[]
+        )
+    
+    def _compile_analysis(self, data: Dict, keywords: Counter) -> CommentAnalysis:
+        """Compila i dati dell'analisi in un oggetto strutturato"""
+        # Calcola metriche base
+        unique_authors = len(data['authors'])
+        avg_score = sum(data['scores']) / len(data['scores']) if data['scores'] else 0
+        
+        # Calcola velocità commenti (commenti per ora)
+        if data['timestamps']:
+            time_span = max(data['timestamps']) - min(data['timestamps'])
+            comment_velocity = len(data['timestamps']) / (time_span / 3600) if time_span > 0 else 0
+        else:
+            comment_velocity = 0
+        
+        # Distribuzione sentiment
+        sentiments = data['sentiments']
+        sentiment_dist = {
+            'positive': len([s for s in sentiments if s > 0.1]),
+            'neutral': len([s for s in sentiments if -0.1 <= s <= 0.1]),
+            'negative': len([s for s in sentiments if s < -0.1])
+        }
+        
+        # Normalizza distribuzione sentiment
+        total_sentiments = len(sentiments) if sentiments else 1
+        for key in sentiment_dist:
+            sentiment_dist[key] = sentiment_dist[key] / total_sentiments
+        
+        # Top keywords
+        top_keywords = keywords.most_common(10)
+        
+        return CommentAnalysis(
+            total_comments=data['total'],
+            unique_authors=unique_authors,
+            avg_comment_score=avg_score,
+            comment_velocity=comment_velocity,
+            sentiment_distribution=sentiment_dist,
+            controversial_comments=data['controversial'],
+            depth_distribution=dict(data['depths']),
+            top_keywords=top_keywords
+        )
+    
+    def calculate_discussion_quality(self, comment_analysis: CommentAnalysis) -> float:
+        """Calcola un punteggio di qualità per la discussione (0-100)"""
+        if comment_analysis.total_comments == 0:
+            return 0
+        
+        quality_score = 0
+        
+        # Diversità autori (massimo 25 punti)
+        author_diversity = min(comment_analysis.unique_authors / comment_analysis.total_comments, 1)
+        quality_score += author_diversity * 25
+        
+        # Engagement commenti (massimo 25 punti)
+        engagement_score = min(comment_analysis.avg_comment_score / 10, 1)
+        quality_score += engagement_score * 25
+        
+        # Velocità discussione (massimo 20 punti)
+        velocity_score = min(comment_analysis.comment_velocity / 50, 1)
+        quality_score += velocity_score * 20
+        
+        # Profondità discussione (massimo 15 punti)
+        deep_comments = sum(count for depth, count in comment_analysis.depth_distribution.items() if depth >= 2)
+        depth_score = min(deep_comments / comment_analysis.total_comments, 1)
+        quality_score += depth_score * 15
+        
+        # Qualità sentiment (massimo 15 punti)
+        positive_ratio = comment_analysis.sentiment_distribution['positive']
+        neutral_ratio = comment_analysis.sentiment_distribution['neutral']
+        sentiment_score = (positive_ratio + neutral_ratio * 0.5)
+        quality_score += sentiment_score * 15
+        
+        return min(quality_score, 100)
+    
+    def calculate_controversy_score(self, comment_analysis: CommentAnalysis, upvote_ratio: float) -> float:
+        """Calcola un punteggio di controversia (0-100)"""
+        if comment_analysis.total_comments == 0:
+            return 0
+        
+        controversy_score = 0
+        
+        # Commenti controversi (massimo 40 punti)
+        controversial_ratio = comment_analysis.controversial_comments / comment_analysis.total_comments
+        controversy_score += controversial_ratio * 40
+        
+        # Upvote ratio basso (massimo 30 punti)
+        ratio_score = (1 - upvote_ratio) * 30
+        controversy_score += ratio_score
+        
+        # Distribuzione sentiment polarizzata (massimo 30 punti)
+        sentiment_balance = abs(comment_analysis.sentiment_distribution['positive'] - 
+                              comment_analysis.sentiment_distribution['negative'])
+        controversy_score += sentiment_balance * 30
+        
+        return min(controversy_score, 100)
+
+class AdvancedTopicAnalyzer:
+    """Analizzatore avanzato per l'identificazione dei topic con focus discussioni"""
+    
+    def __init__(self):
+        self.discussion_analyzer = DiscussionAnalyzer()
         self.stop_words = {
             'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 
             'by', 'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'be', 'been', 
             'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 
-            'should', 'may', 'might', 'must', 'can', 'what', 'when', 'where', 'why', 'how', 
-            'which', 'who', 'whom', 'about', 'into', 'through', 'during', 'before', 'after',
-            'above', 'below', 'up', 'down', 'out', 'off', 'over', 'under', 'again', 'further',
-            'then', 'once', 'here', 'there', 'all', 'any', 'both', 'each', 'few', 'more',
-            'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
-            'than', 'too', 'very', 'just', 'now'
+            'should', 'may', 'might', 'must', 'can', 'what', 'when', 'where', 'why', 'how'
         }
         
-        # Categorie più specifiche e dettagliate
-        self.categories = {
-            'technology': {
-                'keywords': ['ai', 'artificial', 'intelligence', 'tech', 'programming', 'software', 
-                           'computer', 'code', 'app', 'digital', 'cybersecurity', 'blockchain', 
-                           'crypto', 'startup', 'innovation', 'algorithm', 'data', 'cloud'],
-                'weight': 1.2
-            },
-            'gaming': {
-                'keywords': ['game', 'gaming', 'playstation', 'xbox', 'nintendo', 'steam', 
-                           'console', 'esports', 'streamer', 'twitch', 'discord', 'fps', 'mmo'],
-                'weight': 1.1
-            },
-            'finance': {
-                'keywords': ['stock', 'market', 'invest', 'crypto', 'bitcoin', 'trading', 
-                           'economy', 'financial', 'money', 'bank', 'inflation', 'recession'],
-                'weight': 1.3
-            },
-            'entertainment': {
-                'keywords': ['movie', 'film', 'tv', 'series', 'music', 'netflix', 'youtube', 
-                           'celebrity', 'hollywood', 'streaming', 'podcast', 'album', 'concert'],
-                'weight': 1.0
-            },
-            'politics': {
-                'keywords': ['politics', 'government', 'election', 'policy', 'law', 'vote', 
-                           'president', 'congress', 'senate', 'democracy', 'republican', 'democrat'],
-                'weight': 1.4
-            },
-            'science': {
-                'keywords': ['science', 'research', 'study', 'discovery', 'space', 'climate', 
-                           'medical', 'health', 'covid', 'vaccine', 'medicine', 'physics', 'biology'],
-                'weight': 1.2
-            },
-            'social': {
-                'keywords': ['life', 'relationship', 'advice', 'personal', 'story', 'experience',
-                           'family', 'friend', 'dating', 'marriage', 'social', 'community'],
-                'weight': 0.9
-            },
-            'business': {
-                'keywords': ['job', 'work', 'career', 'salary', 'interview', 'employment', 
-                           'business', 'company', 'corporate', 'startup', 'entrepreneur'],
-                'weight': 1.1
-            }
-        }
-        
-        # Pattern per identificare trending topics
-        self.trending_patterns = [
-            r'\b(?:breaking|urgent|update|alert|news)\b',
-            r'\b(?:just|now|today|happening)\b',
-            r'\b(?:viral|trending|popular|hot)\b',
+        # Pattern per identificare discussioni di qualità
+        self.discussion_patterns = [
+            r'.*\b(discuss|debate|opinion|thoughts|cmv|change my mind)\b.*',
+            r'.*\?$',  # Domande
+            r'.*\[serious\].*',  # Tag serious
+            r'.*\b(why|how|what).*',  # Domande aperte
         ]
-    
-    def extract_keywords(self, text: str, max_keywords: int = 5) -> List[Tuple[str, float]]:
-        """Estrae parole chiave dal testo con punteggio di rilevanza"""
-        text_clean = re.sub(r'[^\w\s]', ' ', text.lower())
-        words = text_clean.split()
-        
-        # Filtra e assegna punteggi
-        keyword_scores = Counter()
-        
-        for word in words:
-            if len(word) > 3 and word not in self.stop_words:
-                # Punteggio base per lunghezza
-                score = len(word) * 0.1
-                
-                # Bonus per parole chiave di categoria
-                for category_data in self.categories.values():
-                    if word in category_data['keywords']:
-                        score *= category_data['weight']
-                
-                # Bonus per pattern trending
-                for pattern in self.trending_patterns:
-                    if re.search(pattern, text.lower()):
-                        score *= 1.5
-                
-                keyword_scores[word] += score
-        
-        return keyword_scores.most_common(max_keywords)
-    
-    def categorize_content(self, title: str, keywords: List[str]) -> Tuple[str, float]:
-        """Categorizza il contenuto con livello di confidenza"""
-        text = f"{title} {' '.join(keywords)}".lower()
-        
-        category_scores = {}
-        
-        for category, data in self.categories.items():
-            score = 0
-            matches = 0
+
+    async def analyze_post_discussion(self, post) -> Tuple[float, float, float]:
+        """Analizza la qualità della discussione di un post"""
+        try:
+            # Analizza i commenti
+            comment_analysis = await self.discussion_analyzer.analyze_comments(post)
             
-            for keyword in data['keywords']:
-                if keyword in text:
-                    score += data['weight']
-                    matches += 1
+            # Calcola metriche
+            discussion_quality = self.discussion_analyzer.calculate_discussion_quality(comment_analysis)
+            controversy_score = self.discussion_analyzer.calculate_controversy_score(comment_analysis, post.upvote_ratio)
             
-            if matches > 0:
-                # Normalizza il punteggio
-                category_scores[category] = (score / len(data['keywords'])) * matches
-        
-        if not category_scores:
-            return 'general', 0.3
-        
-        best_category = max(category_scores, key=category_scores.get)
-        confidence = min(category_scores[best_category], 1.0)
-        
-        return best_category, confidence
-    
-    def calculate_velocity_score(self, posts: List[PostMetrics], time_window_hours: int = 6) -> float:
-        """Calcola la velocità di crescita di un topic"""
-        if not posts:
-            return 0.0
-        
-        now = datetime.now().timestamp()
-        recent_posts = [p for p in posts if (now - p.created_utc) / 3600 <= time_window_hours]
-        
-        if len(recent_posts) < 2:
-            return len(recent_posts) * 10  # Punteggio base per post singoli
-        
-        # Calcola crescita temporale
-        recent_posts.sort(key=lambda x: x.created_utc)
-        time_span = recent_posts[-1].created_utc - recent_posts[0].created_utc
-        
-        if time_span == 0:
-            return len(recent_posts) * 15
-        
-        # Score basato su frequenza e engagement
-        post_frequency = len(recent_posts) / (time_span / 3600)  # Post per ora
-        avg_engagement = sum(p.engagement_rate for p in recent_posts) / len(recent_posts)
-        
-        velocity = post_frequency * avg_engagement * 10
-        return min(velocity, 100)  # Cap a 100
+            # Sentiment medio
+            sentiments = comment_analysis.sentiment_distribution
+            sentiment_score = (sentiments['positive'] - sentiments['negative']) * 100
+            
+            return discussion_quality, controversy_score, sentiment_score
+            
+        except Exception as e:
+            logger.warning(f"Errore analisi discussione: {e}")
+            return 0, 0, 0
 
 class ProfessionalRedditTrendBot:
-    """Bot professionale per l'analisi delle tendenze Reddit"""
+    """Bot professionale per l'analisi delle tendenze Reddit con focus discussioni"""
     
     def __init__(self):
-        # Credenziali e configurazione
         self.reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
         self.reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
         if not all([self.reddit_client_id, self.reddit_client_secret]):
-            raise ValueError("❌ Credenziali Reddit mancanti nelle variabili d'ambiente!")
+            raise ValueError("❌ Credenziali Reddit mancanti!")
         
-        # Componenti del sistema
-        self.db = DatabaseManager()
         self.analyzer = AdvancedTopicAnalyzer()
         self.processed_posts: Set[str] = set()
         
-        # Configurazione subreddit strategici
-        self.tier1_subreddits = [  # Subreddit principali - alta priorità
-            'all', 'popular', 'news', 'worldnews', 'technology', 'science'
+        # Subreddit ottimizzati per discussioni di qualità
+        self.discussion_subreddits = [
+            'askreddit', 'changemyview', 'trueaskreddit', 'discussion', 
+            'seriousconversation', 'casualconversation', 'unpopularopinion',
+            'debate', 'explainlikeimfive', 'tooafraidtoask', 'nostupidquestions'
         ]
         
-        self.tier2_subreddits = [  # Subreddit specializzati - media priorità
-            'gaming', 'movies', 'music', 'askreddit', 'todayilearned',
-            'explainlikeimfive', 'lifeprotips', 'showerthoughts'
-        ]
+        # Metriche specifiche per discussioni
+        self.min_comments_threshold = 20  # Minimo commenti per considerare una discussione
+        self.min_discussion_quality = 30  # Qualità minima discussione
         
-        self.tier3_subreddits = [  # Subreddit di nicchia - bassa priorità
-            'cryptocurrency', 'stocks', 'programming', 'artificial',
-            'futurology', 'space', 'dataisbeautiful'
-        ]
-        
-        # Metriche per il filtraggio
-        self.min_score_threshold = 50
-        self.min_comments_threshold = 10
-        self.max_post_age_hours = 12
-        
-        logger.info("🚀 Bot professionale inizializzato")
-    
+        logger.info("🚀 Bot discussioni Reddit inizializzato")
+
     async def initialize_reddit(self) -> bool:
-        """Inizializza la connessione Reddit con gestione errori avanzata"""
-        max_retries = 3
+        """Inizializza la connessione Reddit"""
+        try:
+            self.reddit = asyncpraw.Reddit(
+                client_id=self.reddit_client_id,
+                client_secret=self.reddit_client_secret,
+                user_agent='DiscussionTrendBot/1.0',
+                timeout=60
+            )
+            await self.reddit.user.me()
+            logger.info("✅ Connessione Reddit stabilita")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Errore connessione Reddit: {e}")
+            return False
+
+    async def analyze_discussion_trends(self) -> Optional[TrendData]:
+        """Analizza le tendenze delle discussioni ogni 15 minuti"""
+        logger.info("🔍 Analisi discussioni trending in corso...")
         
-        for attempt in range(max_retries):
+        all_posts = []
+        
+        # Analizza i subreddit di discussione
+        for subreddit_name in self.discussion_subreddits:
             try:
-                self.reddit = asyncpraw.Reddit(
-                    client_id=self.reddit_client_id,
-                    client_secret=self.reddit_client_secret,
-                    user_agent='ProfessionalRedditTrendBot/2.0 (by /u/YourUsername)',
-                    timeout=60
-                )
+                subreddit = await self.reddit.subreddit(subreddit_name)
+                posts_data = []
                 
-                # Test della connessione
-                await self.reddit.user.me()
-                logger.info("✅ Connessione Reddit stabilita con successo")
-                return True
+                # Combina hot e new per catturare discussioni emergenti
+                async for post in subreddit.hot(limit=15):
+                    if (post.num_comments >= self.min_comments_threshold and 
+                        post.id not in self.processed_posts):
+                        
+                        # Analizza la discussione
+                        discussion_quality, controversy, sentiment = await self.analyzer.analyze_post_discussion(post)
+                        
+                        if discussion_quality >= self.min_discussion_quality:
+                            post_metrics = PostMetrics(
+                                id=post.id,
+                                title=post.title,
+                                subreddit=post.subreddit.display_name,
+                                score=post.score,
+                                comments=post.num_comments,
+                                created_utc=post.created_utc,
+                                upvote_ratio=post.upvote_ratio,
+                                engagement_rate=(post.score + post.num_comments) / max((time.time() - post.created_utc) / 3600, 0.1),
+                                comment_velocity=post.num_comments / max((time.time() - post.created_utc) / 3600, 0.1),
+                                awards=post.total_awards_received,
+                                sentiment=sentiment
+                            )
+                            
+                            posts_data.append((post_metrics, discussion_quality, controversy))
+                            self.processed_posts.add(post.id)
+                
+                all_posts.extend(posts_data)
+                logger.info(f"📊 r/{subreddit_name}: {len(posts_data)} discussioni di qualità")
+                
+                await asyncio.sleep(1)  # Rate limiting
                 
             except Exception as e:
-                logger.warning(f"⚠️ Tentativo {attempt + 1}/{max_retries} fallito: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5 * (attempt + 1))
-        
-        logger.error("❌ Impossibile connettersi a Reddit")
-        return False
-    
-    def calculate_post_metrics(self, post) -> PostMetrics:
-        """Calcola metriche avanzate per un post"""
-        # Engagement rate = (score + comments) / età_in_ore
-        post_age_hours = (datetime.now().timestamp() - post.created_utc) / 3600
-        engagement_rate = (post.score + post.num_comments * 2) / max(post_age_hours, 0.1)
-        
-        return PostMetrics(
-            id=post.id,
-            title=post.title,
-            subreddit=post.subreddit.display_name,
-            score=post.score,
-            comments=post.num_comments,
-            created_utc=post.created_utc,
-            upvote_ratio=post.upvote_ratio,
-            engagement_rate=engagement_rate
-        )
-    
-    async def analyze_subreddit_trends(self, subreddit_name: str, limit: int = 25) -> List[PostMetrics]:
-        """Analizza le tendenze di un singolo subreddit"""
-        try:
-            subreddit = await self.reddit.subreddit(subreddit_name)
-            posts_data = []
-            
-            # Combina hot e rising per catturare tendenze emergenti
-            hot_posts = subreddit.hot(limit=limit // 2)
-            rising_posts = subreddit.rising(limit=limit // 2)
-            
-            for post_stream in [hot_posts, rising_posts]:
-                async for post in post_stream:
-                    if post.id in self.processed_posts:
-                        continue
-                    
-                    # Filtri di qualità
-                    post_age_hours = (datetime.now().timestamp() - post.created_utc) / 3600
-                    
-                    if (post.score >= self.min_score_threshold and 
-                        post.num_comments >= self.min_comments_threshold and 
-                        post_age_hours <= self.max_post_age_hours and
-                        post.upvote_ratio >= 0.6):
-                        
-                        posts_data.append(self.calculate_post_metrics(post))
-                        self.processed_posts.add(post.id)
-            
-            return posts_data
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Errore analisi r/{subreddit_name}: {e}")
-            return []
-    
-    async def find_trending_topics(self) -> Optional[TrendData]:
-        """Trova il topic più in tendenza con analisi multi-livello"""
-        logger.info("🔍 Avvio analisi tendenze avanzata...")
-        
-        all_posts: List[PostMetrics] = []
-        subreddit_weights = {}
-        
-        # Analizza subreddit per tier con pesi diversi
-        for tier, (subreddits, weight) in enumerate([
-            (self.tier1_subreddits, 3.0),
-            (self.tier2_subreddits, 2.0), 
-            (self.tier3_subreddits, 1.0)
-        ], 1):
-            
-            logger.info(f"📊 Analisi Tier {tier}: {len(subreddits)} subreddit")
-            
-            for subreddit_name in subreddits:
-                posts = await self.analyze_subreddit_trends(subreddit_name)
-                all_posts.extend(posts)
-                subreddit_weights[subreddit_name] = weight
-                
-                await asyncio.sleep(0.5)  # Rate limiting
+                logger.warning(f"⚠️ Errore analisi r/{subreddit_name}: {e}")
         
         if not all_posts:
-            logger.warning("⚠️ Nessun post valido trovato")
+            logger.info("ℹ️ Nessuna discussione di qualità trovata")
             return None
         
-        # Raggruppa per topic usando keywords
-        topic_groups = defaultdict(list)
-        
-        for post in all_posts:
-            keywords = self.analyzer.extract_keywords(post.title, 3)
-            if keywords:
-                main_keyword = keywords[0][0]  # Keyword principale
-                topic_groups[main_keyword].append(post)
-        
-        # Analizza ogni topic e calcola metriche
-        topic_scores = {}
-        
-        for topic, posts in topic_groups.items():
-            if len(posts) < 2:  # Richiede almeno 2 post per essere considerato trending
-                continue
-            
-            # Metriche aggregate
-            total_score = sum(p.score for p in posts)
-            total_comments = sum(p.comments for p in posts)
-            avg_engagement = sum(p.engagement_rate for p in posts) / len(posts)
-            
-            # Peso per subreddit
-            weighted_score = sum(
-                p.score * subreddit_weights.get(p.subreddit, 1.0) 
-                for p in posts
-            )
-            
-            # Velocità di crescita
-            velocity = self.analyzer.calculate_velocity_score(posts)
-            
-            # Diversità di subreddit (bonus per topic cross-subreddit)
-            unique_subreddits = len(set(p.subreddit for p in posts))
-            diversity_bonus = 1 + (unique_subreddits - 1) * 0.2
-            
-            # Score finale
-            final_score = (weighted_score + velocity * 10) * diversity_bonus
-            
-            topic_scores[topic] = {
-                'posts': posts,
-                'total_score': total_score,
-                'velocity': velocity,
-                'engagement': avg_engagement,
-                'final_score': final_score,
-                'diversity': unique_subreddits
-            }
-        
-        if not topic_scores:
-            logger.warning("⚠️ Nessun topic trending identificato")
+        # Raggruppa per topic e trova le discussioni più trend
+        trending_discussion = await self._identify_trending_discussion(all_posts)
+        return trending_discussion
+
+    async def _identify_trending_discussion(self, posts_data: List[Tuple]) -> Optional[TrendData]:
+        """Identifica la discussione più trend tra i post analizzati"""
+        if not posts_data:
             return None
         
-        # Trova il topic più in tendenza
-        best_topic = max(topic_scores.keys(), key=lambda t: topic_scores[t]['final_score'])
-        best_data = topic_scores[best_topic]
+        # Calcola score composito per ogni discussione
+        discussion_scores = []
         
-        # Categorizza e crea risultato finale
-        all_keywords = []
-        for post in best_data['posts'][:5]:
-            keywords = self.analyzer.extract_keywords(post.title, 2)
-            all_keywords.extend([k[0] for k in keywords])
+        for post_metrics, quality, controversy in posts_data:
+            # Score basato su engagement, qualità e velocità
+            base_score = post_metrics.engagement_rate * 0.4
+            quality_score = quality * 0.3
+            velocity_score = post_metrics.comment_velocity * 0.2
+            diversity_score = min(post_metrics.comments / 100, 1) * 0.1
+            
+            total_score = (base_score + quality_score + velocity_score + diversity_score) * 100
+            
+            discussion_scores.append((post_metrics, quality, controversy, total_score))
         
-        category, confidence = self.analyzer.categorize_content(best_topic, all_keywords)
+        # Ordina per score e prendi la migliore
+        discussion_scores.sort(key=lambda x: x[3], reverse=True)
+        best_post, best_quality, best_controversy, best_score = discussion_scores[0]
         
-        # Top posts per il report
-        top_posts = sorted(best_data['posts'], key=lambda p: p.engagement_rate, reverse=True)[:5]
-        top_posts_data = [
-            {
-                'title': p.title[:100] + ('...' if len(p.title) > 100 else ''),
-                'subreddit': p.subreddit,
-                'score': p.score,
-                'comments': p.comments,
-                'engagement': round(p.engagement_rate, 1)
-            }
-            for p in top_posts
-        ]
+        # Estrai keywords dal titolo per categorizzazione
+        keywords = self._extract_discussion_keywords(best_post.title)
+        category = self._categorize_discussion(best_post.title, keywords)
         
-        result = TrendData(
-            topic=best_topic,
+        # Crea TrendData
+        trend = TrendData(
+            topic=best_post.title[:50] + ('...' if len(best_post.title) > 50 else ''),
             category=category,
-            total_score=best_data['total_score'],
-            velocity_score=best_data['velocity'],
-            post_count=len(best_data['posts']),
-            comment_count=sum(p.comments for p in best_data['posts']),
-            avg_engagement=best_data['engagement'],
-            top_posts=top_posts_data,
-            subreddits=list(set(p.subreddit for p in best_data['posts'])),
+            total_score=int(best_post.score),
+            velocity_score=best_post.comment_velocity,
+            post_count=1,  # Una discussione principale
+            comment_count=best_post.comments,
+            avg_engagement=best_post.engagement_rate,
+            top_posts=[{
+                'title': best_post.title,
+                'subreddit': best_post.subreddit,
+                'score': best_post.score,
+                'comments': best_post.comments,
+                'engagement': round(best_post.engagement_rate, 1),
+                'quality': round(best_quality, 1),
+                'controversy': round(best_controversy, 1)
+            }],
+            subreddits=[best_post.subreddit],
             timestamp=datetime.now(),
-            confidence_level=confidence
+            confidence_level=min(best_score / 100, 1.0),
+            sentiment_score=best_post.sentiment,
+            discussion_quality=best_quality,
+            controversy_score=best_controversy
         )
         
-        # Salva nel database
-        self.db.save_trend(result)
+        logger.info(f"🔥 DISCUSSIONE TREND: {trend.topic}")
+        logger.info(f"   📊 Qualità: {best_quality:.1f} | Controversia: {best_controversy:.1f}")
+        logger.info(f"   💬 Commenti: {best_post.comments} | Score: {best_score:.1f}")
         
-        logger.info(f"🔥 TRENDING: {best_topic} | Score: {best_data['final_score']:.1f} | Confidenza: {confidence:.2f}")
-        return result
-    
-    def format_professional_alert(self, trend: TrendData) -> str:
-        """Formatta un alert professionale per il trending topic"""
+        return trend
+
+    def _extract_discussion_keywords(self, text: str) -> List[str]:
+        """Estrae keywords significative dal titolo della discussione"""
+        clean_text = re.sub(r'[^\w\s]', ' ', text.lower())
+        words = [word for word in clean_text.split() 
+                if len(word) > 3 and word not in self.analyzer.stop_words]
+        return words[:5]
+
+    def _categorize_discussion(self, title: str, keywords: List[str]) -> str:
+        """Categorizza la discussione basandosi sul contenuto"""
+        text = f"{title} {' '.join(keywords)}".lower()
         
-        # Emoji per categoria
-        category_emojis = {
-            'technology': '💻', 'gaming': '🎮', 'finance': '💰',
-            'entertainment': '🎬', 'politics': '🏛️', 'science': '🔬',
-            'social': '👥', 'business': '💼', 'general': '🔥'
+        categories = {
+            'social': ['relationship', 'friend', 'family', 'dating', 'marriage'],
+            'philosophy': ['life', 'meaning', 'purpose', 'exist', 'think'],
+            'politics': ['government', 'policy', 'vote', 'political', 'election'],
+            'technology': ['tech', 'ai', 'internet', 'digital', 'phone'],
+            'entertainment': ['movie', 'music', 'game', 'show', 'celebrity'],
+            'education': ['learn', 'study', 'school', 'university', 'teach'],
+            'health': ['health', 'medical', 'doctor', 'fitness', 'diet']
         }
         
-        emoji = category_emojis.get(trend.category, '🔥')
-        confidence_indicator = "🟢" if trend.confidence_level > 0.7 else "🟡" if trend.confidence_level > 0.4 else "🔴"
+        for category, keywords in categories.items():
+            if any(keyword in text for keyword in keywords):
+                return category
         
-        alert = f"""{emoji} **REDDIT TREND ALERT** {emoji}
+        return 'general'
 
-🎯 **TOPIC IN TENDENZA**: {trend.topic.upper()}
-📂 **Categoria**: {trend.category.title()}
-{confidence_indicator} **Confidenza**: {trend.confidence_level:.1%}
-
-📈 **METRICHE PERFORMANCE**
-├ Velocità crescita: {trend.velocity_score:.1f}/100
-├ Discussioni attive: {trend.post_count}
-├ Commenti totali: {trend.comment_count:,}
-├ Engagement medio: {trend.avg_engagement:.1f}
-└ Score aggregato: {trend.total_score:,}
-
-🌐 **Subreddit coinvolti**: {len(trend.subreddits)}
-{', '.join(f'r/{sr}' for sr in trend.subreddits[:5])}{'...' if len(trend.subreddits) > 5 else ''}
-
-💬 **TOP DISCUSSIONI**"""
+    def format_discussion_alert(self, trend: TrendData) -> str:
+        """Formatta un alert specifico per discussioni trend"""
+        emoji = "💬" if trend.controversy_score < 50 else "⚡"
+        quality_emoji = "🟢" if trend.discussion_quality > 70 else "🟡" if trend.discussion_quality > 40 else "🔴"
         
-        for i, post in enumerate(trend.top_posts[:3], 1):
-            alert += f"\n{i}. {post['title']}"
-            alert += f"\n   📊 {post['score']} upvotes • {post['comments']} commenti • r/{post['subreddit']}"
-        
-        alert += f"\n\n⏰ **Rilevazione**: {trend.timestamp.strftime('%H:%M - %d/%m/%Y')}"
-        alert += f"\n🤖 **Bot**: Professional Reddit Trend Analyzer v2.0"
-        
+        alert = f"""{emoji} **DISCUSSIONE TREND SU REDDIT** {emoji}
+
+🗣️ **Discussione**: {trend.topic}
+📂 **Categoria**: {trend.category}
+🏷️ **Subreddit**: r/{trend.subreddits[0]}
+
+📊 **METRICHE DISCUSSIONE**
+{quality_emoji} **Qualità**: {trend.discussion_quality:.1f}/100
+⚖️ **Controversia**: {trend.controversy_score:.1f}/100
+😊 **Sentiment**: {trend.sentiment_score:.1f}
+⬆️ **Upvotes**: {trend.total_score:,}
+💬 **Commenti**: {trend.comment_count:,}
+🚀 **Velocità**: {trend.velocity_score:.1f} commenti/ora
+
+🔍 **DETTAGLI**
+• Engagement rate: {trend.avg_engagement:.1f}
+• Confidenza trend: {trend.confidence_level:.1%}
+• Timestamp: {trend.timestamp.strftime('%H:%M - %d/%m/%Y')}
+
+💡 **Analisi**: {'Discussione di alta qualità' if trend.discussion_quality > 70 else 
+                'Discussione attiva' if trend.discussion_quality > 40 else 
+                'Discussione emergente'}"""
+
         return alert
-    
-    async def send_telegram_notification(self, message: str) -> bool:
-        """Invia notifica Telegram con retry automatico"""
-        if not self.telegram_token or not self.telegram_chat_id:
-            logger.info("📱 Telegram non configurato - skip notifica")
-            return False
+
+    async def run_continuous_analysis(self):
+        """Esegue l'analisi continua ogni 15 minuti"""
+        logger.info("🚀 AVVIO ANALISI DISCUSSIONI TREND")
+        logger.info("⏰ Frequenza: ogni 15 minuti")
         
-        max_retries = 3
-        
-        for attempt in range(max_retries):
-            try:
-                url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-                payload = {
-                    'chat_id': self.telegram_chat_id,
-                    'text': message,
-                    'parse_mode': 'Markdown',
-                    'disable_web_page_preview': True
-                }
-                
-                timeout = aiohttp.ClientTimeout(total=30)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(url, json=payload) as response:
-                        if response.status == 200:
-                            logger.info("✅ Notifica Telegram inviata con successo")
-                            return True
-                        else:
-                            logger.warning(f"⚠️ Telegram error {response.status}: {await response.text()}")
-            
-            except Exception as e:
-                logger.warning(f"⚠️ Tentativo {attempt + 1} Telegram fallito: {e}")
-                
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)  # Backoff esponenziale
-        
-        logger.error("❌ Invio Telegram fallito dopo tutti i tentativi")
-        return False
-    
-    async def run_professional_analysis(self):
-        """Esegue l'analisi professionale delle tendenze"""
-        logger.info("🚀 AVVIO PROFESSIONAL REDDIT TREND BOT")
-        logger.info("📊 Frequenza analisi: ogni 15 minuti")
-        logger.info("🎯 Focus: identificazione trending topics in tempo reale")
-        
-        # Inizializzazione
         if not await self.initialize_reddit():
-            logger.error("❌ Impossibile avviare il bot - connessione Reddit fallita")
             return
         
-        # Notifica di avvio
-        if self.telegram_token:
-            startup_msg = ("🚀 **Professional Reddit Trend Bot ONLINE**\n"
-                         "📊 Monitoraggio trending topics attivato\n"
-                         "⚡ Analisi ogni 15 minuti")
-            await self.send_telegram_notification(startup_msg)
-        
-        analysis_counter = 0
-        consecutive_errors = 0
-        max_consecutive_errors = 3
-        
-        logger.info("✅ Bot operativo e in monitoraggio...")
+        analysis_count = 0
         
         while True:
             try:
-                analysis_counter += 1
+                analysis_count += 1
                 start_time = datetime.now()
                 
-                logger.info(f"🔄 Analisi #{analysis_counter} iniziata")
+                logger.info(f"🔄 Analisi #{analysis_count} iniziata")
                 
-                # Trova trending topic
-                trending_topic = await self.find_trending_topics()
+                # Trova discussioni trend
+                trending_discussion = await self.analyze_discussion_trends()
                 
-                if trending_topic:
+                if trending_discussion:
                     # Formatta e invia alert
-                    alert_message = self.format_professional_alert(trending_topic)
+                    alert_message = self.format_discussion_alert(trending_discussion)
                     
-                    # Log dettagliato
-                    logger.info(f"📊 RISULTATI ANALISI #{analysis_counter}")
-                    logger.info(f"   🎯 Topic: {trending_topic.topic}")
-                    logger.info(f"   📂 Categoria: {trending_topic.category}")
-                    logger.info(f"   ⚡ Velocità: {trending_topic.velocity_score:.1f}")
-                    logger.info(f"   📈 Engagement: {trending_topic.avg_engagement:.1f}")
-                    logger.info(f"   🔗 Subreddit: {len(trending_topic.subreddits)}")
-                    
-                    # Invia notifica
                     if self.telegram_token:
                         await self.send_telegram_notification(alert_message)
                     
-                    consecutive_errors = 0  # Reset contatore errori
-                    
+                    logger.info(f"✅ Analisi #{analysis_count} completata - Discussione trovata")
                 else:
-                    logger.info(f"ℹ️ Nessun trending topic significativo trovato nell'analisi #{analysis_counter}")
+                    logger.info(f"ℹ️ Analisi #{analysis_count} completata - Nessuna discussione significativa")
                 
-                # Pulizia periodica
-                if analysis_counter % 20 == 0:
-                    old_count = len(self.processed_posts)
-                    # Mantieni solo gli ultimi 1000 post processati per evitare memory leak
+                # Pulizia periodica della cache
+                if analysis_count % 10 == 0:
                     if len(self.processed_posts) > 1000:
-                        posts_list = list(self.processed_posts)
-                        self.processed_posts = set(posts_list[-500:])
-                    
-                    logger.info(f"🧹 Pulizia cache: {old_count} → {len(self.processed_posts)} post")
+                        self.processed_posts = set(list(self.processed_posts)[-500:])
+                    logger.info(f"🧹 Cache pulita: {len(self.processed_posts)} post")
                 
-                # Statistiche performance
+                # Calcola tempo rimanente per i 15 minuti
                 elapsed = (datetime.now() - start_time).total_seconds()
-                logger.info(f"⏱️ Analisi #{analysis_counter} completata in {elapsed:.1f}s")
+                wait_time = max(900 - elapsed, 60)  # Minimo 1 minuto di attesa
                 
-                # Attesa 15 minuti
-                logger.info("⏸️ Pausa di 15 minuti prima della prossima analisi...")
-                await asyncio.sleep(900)  # 15 minuti
+                logger.info(f"⏸️ Prossima analisi tra {wait_time/60:.1f} minuti")
+                await asyncio.sleep(wait_time)
                 
             except KeyboardInterrupt:
-                logger.info("🛑 Interruzione manuale richiesta")
+                logger.info("🛑 Interruzione manuale")
                 break
-                
             except Exception as e:
-                consecutive_errors += 1
-                logger.error(f"❌ Errore durante analisi #{analysis_counter}: {e}")
-                
-                if consecutive_errors >= max_consecutive_errors:
-                    logger.critical(f"🚨 TROPPI ERRORI CONSECUTIVI ({consecutive_errors})")
-                    if self.telegram_token:
-                        error_msg = (f"🚨 **ALERT SISTEMA**\n"
-                                   f"Bot in errore dopo {consecutive_errors} tentativi\n"
-                                   f"Ultimo errore: {str(e)[:100]}")
-                        await self.send_telegram_notification(error_msg)
-                    
-                    # Pausa più lunga in caso di errori multipli
-                    logger.info("⏸️ Pausa estesa di 30 minuti per recupero sistema...")
-                    await asyncio.sleep(1800)  # 30 minuti
-                    consecutive_errors = 0
-                else:
-                    # Pausa breve per errori singoli
-                    logger.info(f"⏸️ Pausa di 5 minuti per recupero (errore {consecutive_errors}/{max_consecutive_errors})")
-                    await asyncio.sleep(300)  # 5 minuti
+                logger.error(f"❌ Errore analisi #{analysis_count}: {e}")
+                logger.info("⏸️ Ripresa in 5 minuti...")
+                await asyncio.sleep(300)
+
+    async def send_telegram_notification(self, message: str) -> bool:
+        """Invia notifica Telegram"""
+        if not self.telegram_token or not self.telegram_chat_id:
+            return False
         
-        # Cleanup finale
         try:
-            if hasattr(self, 'reddit'):
-                await self.reddit.close()
-                logger.info("🔌 Connessione Reddit chiusa")
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+            payload = {
+                'chat_id': self.telegram_chat_id,
+                'text': message,
+                'parse_mode': 'Markdown'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        logger.info("✅ Notifica Telegram inviata")
+                        return True
+                    else:
+                        logger.warning(f"⚠️ Errore Telegram: {response.status}")
+                        return False
         except Exception as e:
-            logger.warning(f"⚠️ Errore chiusura Reddit: {e}")
-        
-        # Notifica shutdown
-        if self.telegram_token:
-            shutdown_msg = "🔴 **Bot Spento**\nProfessional Reddit Trend Bot disconnesso"
-            await self.send_telegram_notification(shutdown_msg)
-        
-        logger.info("👋 Professional Reddit Trend Bot terminato")
+            logger.error(f"❌ Errore invio Telegram: {e}")
+            return False
 
-    async def generate_daily_report(self) -> str:
-        """Genera un report giornaliero delle tendenze"""
-        try:
-            trends = self.db.get_historical_trends(24)
-            
-            if not trends:
-                return "📊 **REPORT GIORNALIERO**\nNessun dato disponibile per le ultime 24 ore."
-            
-            # Analisi dei dati
-            topics_counter = Counter(trend['topic'] for trend in trends)
-            categories_counter = Counter(trend['category'] for trend in trends)
-            
-            top_topics = topics_counter.most_common(5)
-            top_categories = categories_counter.most_common(3)
-            
-            avg_velocity = sum(trend['velocity_score'] for trend in trends) / len(trends)
-            total_posts = sum(trend['post_count'] for trend in trends)
-            total_comments = sum(trend['comment_count'] for trend in trends)
-            
-            report = f"""📊 **REPORT GIORNALIERO TENDENZE REDDIT**
-🗓️ Periodo: Ultime 24 ore
-📈 Analisi effettuate: {len(trends)}
-
-🔥 **TOP TRENDING TOPICS**"""
-            
-            for i, (topic, count) in enumerate(top_topics, 1):
-                report += f"\n{i}. {topic.title()} ({count} rilevazioni)"
-            
-            report += f"\n\n📂 **CATEGORIE PIÙ ATTIVE**"
-            for i, (category, count) in enumerate(top_categories, 1):
-                report += f"\n{i}. {category.title()} ({count} trending)"
-            
-            report += f"""
-
-📊 **STATISTICHE AGGREGATE**
-├ Velocità media: {avg_velocity:.1f}/100
-├ Post totali analizzati: {total_posts:,}
-├ Commenti totali: {total_comments:,}
-└ Engagement medio: {(total_posts + total_comments) / len(trends):.1f}
-
-⚡ Prossimo report: tra 24 ore
-🤖 Professional Reddit Trend Bot v2.0"""
-            
-            return report
-            
-        except Exception as e:
-            logger.error(f"Errore generazione report: {e}")
-            return f"❌ Errore nella generazione del report giornaliero: {str(e)[:100]}"
-
-    async def send_daily_report(self):
-        """Invia il report giornaliero"""
-        if self.telegram_token:
-            report = await self.generate_daily_report()
-            await self.send_telegram_notification(report)
-            logger.info("📊 Report giornaliero inviato")
-
-# ===== UTILITÀ E CONFIGURAZIONE =====
-
-def setup_environment():
-    """Configura l'ambiente e verifica le dipendenze"""
-    required_vars = ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET']
-    optional_vars = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
-    
-    missing_required = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_required:
-        logger.error(f"❌ Variabili d'ambiente mancanti: {', '.join(missing_required)}")
-        logger.error("💡 Configura le credenziali Reddit:")
-        logger.error("   export REDDIT_CLIENT_ID='your_client_id'")
-        logger.error("   export REDDIT_CLIENT_SECRET='your_client_secret'")
-        return False
-    
-    missing_optional = [var for var in optional_vars if not os.getenv(var)]
-    if missing_optional:
-        logger.warning(f"⚠️ Variabili opzionali mancanti (no Telegram): {', '.join(missing_optional)}")
-    
-    # Crea directory per logs se non esiste
-    Path('logs').mkdir(exist_ok=True)
-    
-    return True
+# Configurazione NLTK
+def setup_nltk():
+    """Configura NLTK per l'analisi del sentiment"""
+    try:
+        nltk.data.find('vader_lexicon')
+    except LookupError:
+        nltk.download('vader_lexicon')
 
 async def main():
-    """Funzione principale con gestione errori robusta"""
-    logger.info("=" * 60)
-    logger.info("🚀 PROFESSIONAL REDDIT TREND BOT v2.0")
-    logger.info("📊 Analisi avanzata tendenze Reddit in tempo reale")
-    logger.info("=" * 60)
+    """Funzione principale"""
+    logger.info("=" * 50)
+    logger.info("💬 REDDIT DISCUSSION TREND BOT")
+    logger.info("⏰ Rilevamento discussioni trend ogni 15 minuti")
+    logger.info("=" * 50)
     
-    # Verifica ambiente
-    if not setup_environment():
+    # Configura NLTK
+    setup_nltk()
+    
+    # Verifica credenziali
+    if not os.getenv('REDDIT_CLIENT_ID') or not os.getenv('REDDIT_CLIENT_SECRET'):
+        logger.error("❌ Configura REDDIT_CLIENT_ID e REDDIT_CLIENT_SECRET")
         return
     
-    # Inizializza e avvia bot
+    # Avvia il bot
+    bot = ProfessionalRedditTrendBot()
+    
     try:
-        bot = ProfessionalRedditTrendBot()
-        
-        # Crea task per analisi principale
-        main_task = asyncio.create_task(bot.run_professional_analysis())
-        
-        # Task per report giornaliero (opzionale)
-        async def daily_report_scheduler():
-            while True:
-                # Calcola secondi fino alla prossima mezzanotte
-                now = datetime.now()
-                tomorrow = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                seconds_until_report = (tomorrow - now).total_seconds()
-                
-                await asyncio.sleep(seconds_until_report)
-                await bot.send_daily_report()
-                await asyncio.sleep(24 * 60 * 60)  # 24 ore
-        
-        if bot.telegram_token:
-            report_task = asyncio.create_task(daily_report_scheduler())
-            await asyncio.gather(main_task, report_task)
-        else:
-            await main_task
-            
+        await bot.run_continuous_analysis()
     except KeyboardInterrupt:
-        logger.info("🛑 Shutdown richiesto dall'utente")
+        logger.info("👋 Bot fermato")
     except Exception as e:
-        logger.critical(f"🚨 ERRORE CRITICO: {e}")
-        logger.critical("💡 Controlla le credenziali e la connessione internet")
-    finally:
-        logger.info("👋 Arrivederci!")
-
-# ===== ENTRY POINT =====
+        logger.error(f"🚨 Errore critico: {e}")
 
 if __name__ == "__main__":
-    # Configurazione finale logging
-    logger.info("🔧 Inizializzazione Professional Reddit Trend Bot...")
-    
-    # Avvia il bot
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Interruzione da tastiera")
-    except Exception as e:
-        logger.critical(f"🚨 Errore fatale: {e}")
-        exit(1)
+    asyncio.run(main())
