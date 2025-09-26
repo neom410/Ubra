@@ -2,6 +2,7 @@ import asyncpraw
 import asyncio
 import os
 import logging
+import aiohttp
 from datetime import datetime
 from collections import Counter, defaultdict
 
@@ -14,6 +15,10 @@ class SimpleRedditTrendBot:
         # Credenziali Reddit
         self.client_id = os.getenv('REDDIT_CLIENT_ID')
         self.client_secret = os.getenv('REDDIT_CLIENT_SECRET')
+        
+        # Credenziali Telegram
+        self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
         if not self.client_id or not self.client_secret:
             raise ValueError("❌ Configura REDDIT_CLIENT_ID e REDDIT_CLIENT_SECRET")
@@ -173,6 +178,52 @@ class SimpleRedditTrendBot:
         report += f"⏰ Aggiornato: {datetime.now().strftime('%H:%M %d/%m/%Y')}"
         return report
 
+    async def send_telegram_message(self, message):
+        """Invia messaggio a Telegram"""
+        if not self.telegram_token or not self.telegram_chat_id:
+            logger.warning("⚠️ Telegram non configurato - skip invio")
+            return False
+        
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+            
+            # Telegram ha limite di 4096 caratteri, dividiamo se necessario
+            if len(message) > 4000:
+                parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
+                for part in parts:
+                    payload = {
+                        'chat_id': self.telegram_chat_id,
+                        'text': part,
+                        'parse_mode': 'Markdown',
+                        'disable_web_page_preview': True
+                    }
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, json=payload) as response:
+                            if response.status != 200:
+                                logger.error(f"❌ Errore Telegram: {await response.text()}")
+                            await asyncio.sleep(1)  # Rate limiting
+            else:
+                payload = {
+                    'chat_id': self.telegram_chat_id,
+                    'text': message,
+                    'parse_mode': 'Markdown',
+                    'disable_web_page_preview': True
+                }
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            logger.info("✅ Messaggio Telegram inviato")
+                            return True
+                        else:
+                            logger.error(f"❌ Errore Telegram: {await response.text()}")
+                            return False
+                            
+        except Exception as e:
+            logger.error(f"❌ Errore invio Telegram: {e}")
+            return False
+
     async def run(self):
         """Esegue il bot in loop"""
         if not await self.initialize_reddit():
@@ -180,14 +231,26 @@ class SimpleRedditTrendBot:
         
         logger.info("✅ Bot avviato - Analisi ogni 15 minuti")
         
+        # Notifica di avvio
+        if self.telegram_token:
+            startup_msg = "🚀 **Reddit Trend Bot AVVIATO**\nMonitoraggio trend ogni 15 minuti"
+            await self.send_telegram_message(startup_msg)
+        
+        analysis_count = 0
+        
         while True:
             try:
+                analysis_count += 1
+                logger.info(f"🔄 Analisi #{analysis_count}")
+                
                 # Trova trend
                 trends = await self.find_trends()
                 
                 if trends:
-                    # Stampa report
+                    # Formatta report
                     report = self.format_trend_report(trends)
+                    
+                    # Stampa a console
                     print("\n" + "="*60)
                     print(report)
                     print("="*60 + "\n")
@@ -196,8 +259,15 @@ class SimpleRedditTrendBot:
                     with open('trends_report.txt', 'w', encoding='utf-8') as f:
                         f.write(report)
                     logger.info("💾 Report salvato in trends_report.txt")
+                    
+                    # Invia a Telegram
+                    if self.telegram_token:
+                        await self.send_telegram_message(report)
                 else:
                     logger.info("ℹ️ Nessun trend trovato in questo ciclo")
+                    if self.telegram_token and analysis_count % 4 == 0:  # Ogni ora
+                        no_trends_msg = "📊 **Ultima analisi**: Nessun trend significativo trovato"
+                        await self.send_telegram_message(no_trends_msg)
                 
                 # Attesa 15 minuti
                 logger.info("⏸️ In attesa di 15 minuti...")
@@ -209,6 +279,11 @@ class SimpleRedditTrendBot:
             except Exception as e:
                 logger.error(f"❌ Errore: {e}")
                 await asyncio.sleep(300)  # Riprova dopo 5 minuti
+        
+        # Notifica di chiusura
+        if self.telegram_token:
+            shutdown_msg = "🔴 **Reddit Trend Bot FERMATO**"
+            await self.send_telegram_message(shutdown_msg)
         
         # Cleanup
         await self.reddit.close()
@@ -225,6 +300,7 @@ async def main():
 if __name__ == "__main__":
     print("🚀 AVVIO BOT TREND REDDIT")
     print("📊 Monitoraggio ogni 15 minuti")
+    print("📱 Invio notifiche Telegram attivo")
     print("⏹️  Premi Ctrl+C per fermare\n")
     
     asyncio.run(main())
