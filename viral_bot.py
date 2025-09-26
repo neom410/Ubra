@@ -1,251 +1,171 @@
 import os
+import requests
+import schedule
+import time
 import praw
 from datetime import datetime
-import requests
-import time
-from collections import Counter
-import re
 import logging
 
 # Configurazione logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Variabili d'ambiente (già configurate su Render)
-REDDIT_CLIENT_ID = os.environ['REDDIT_CLIENT_ID']
-REDDIT_CLIENT_SECRET = os.environ['REDDIT_CLIENT_SECRET']
-TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
-
-# Inizializza Reddit
-reddit = praw.Reddit(
-    client_id=REDDIT_CLIENT_ID,
-    client_secret=REDDIT_CLIENT_SECRET,
-    user_agent="reddit-trend-bot-v1.0"
-)
-
-# Stopwords basic (senza NLTK)
-BASIC_STOPWORDS = {
-    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 
-    'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had',
-    'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must',
-    'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
-    'what', 'which', 'who', 'whom', 'where', 'when', 'why', 'how', 'all', 'any',
-    'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor',
-    'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'can', 'just',
-    'should', 'now', 'reddit', 'like', 'get', 'got', 'make', 'made', 'time', 'see',
-    'its', 'his', 'her', 'our', 'your', 'their', 'has', 'have', 'had', 'does',
-    'did', 'doing', 'would', 'could', 'should', 'might', 'must', 'shall', 'will'
-}
 
 class RedditTrendBot:
     def __init__(self):
-        self.subreddits = ['all', 'popular', 'worldnews', 'technology', 'science', 'programming']
+        # Carica variabili d'ambiente
+        self.reddit_client_id = os.getenv('REDDIT_CLIENT_ID')
+        self.reddit_client_secret = os.getenv('REDDIT_CLIENT_SECRET')
+        self.reddit_user_agent = os.getenv('REDDIT_USER_AGENT', 'RedditTrendBot v1.0')
+        self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         
+        if not all([self.reddit_client_id, self.reddit_client_secret, self.telegram_bot_token]):
+            raise ValueError("Variabili d'ambiente mancanti")
+        
+        # Inizializza Reddit
+        self.reddit = praw.Reddit(
+            client_id=self.reddit_client_id,
+            client_secret=self.reddit_client_secret,
+            user_agent=self.reddit_user_agent
+        )
+        
+        # Cache per chat ID
+        self.chat_id = None
+        
+    def get_telegram_chat_id(self):
+        """Recupera automaticamente il chat ID dal bot"""
+        if self.chat_id:
+            return self.chat_id
+            
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_bot_token}/getUpdates"
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            
+            if data['ok'] and data['result']:
+                # Prendi l'ultimo messaggio ricevuto
+                last_update = data['result'][-1]
+                self.chat_id = last_update['message']['chat']['id']
+                logger.info(f"Chat ID trovato: {self.chat_id}")
+                return self.chat_id
+            else:
+                logger.warning("Nessun messaggio ricevuto dal bot. Invia un messaggio al bot prima.")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Errore nel recupero chat ID: {e}")
+            return None
+    
+    def get_reddit_trends(self):
+        """Analizza le tendenze su Reddit"""
+        trends = []
+        subreddits = ['all', 'popular', 'worldnews', 'technology', 'programming']
+        
+        for subreddit_name in subreddits:
+            try:
+                subreddit = self.reddit.subreddit(subreddit_name)
+                
+                # Analizza post hot degli ultimi 15 minuti
+                for post in subreddit.hot(limit=50):
+                    post_time = datetime.fromtimestamp(post.created_utc)
+                    time_diff = (datetime.now() - post_time).total_seconds() / 60
+                    
+                    # Considera solo post degli ultimi 15 minuti
+                    if time_diff <= 15:
+                        trend_score = (post.score + post.num_comments * 2) / (time_diff + 1)
+                        
+                        trends.append({
+                            'title': post.title,
+                            'subreddit': post.subreddit.display_name,
+                            'score': post.score,
+                            'comments': post.num_comments,
+                            'url': post.url,
+                            'created_utc': post.created_utc,
+                            'trend_score': trend_score
+                        })
+                        
+            except Exception as e:
+                logger.error(f"Errore nell'analisi di r/{subreddit_name}: {e}")
+                continue
+        
+        # Ordina per trend score
+        trends.sort(key=lambda x: x['trend_score'], reverse=True)
+        return trends[:10]  # Top 10 trends
+    
+    def format_alert_message(self, trends):
+        """Formatta il messaggio per Telegram"""
+        if not trends:
+            return "🔍 Nessuna tendenza significativa negli ultimi 15 minuti"
+        
+        message = "🚨 **TREND REDdit - Ultimi 15 minuti** 🚨\n\n"
+        
+        for i, trend in enumerate(trends[:5], 1):
+            message += f"{i}. **{trend['title']}**\n"
+            message += f"   📊 Score: {trend['score']} | 💬 Comments: {trend['comments']}\n"
+            message += f"   📍 r/{trend['subreddit']}\n"
+            message += f"   🔗 [Link]({trend['url']})\n\n"
+        
+        message += f"⏰ Aggiornato: {datetime.now().strftime('%H:%M:%S')}"
+        return message
+    
     def send_telegram_alert(self, message):
         """Invia alert su Telegram"""
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            'chat_id': TELEGRAM_CHAT_ID,
-            'text': message,
-            'parse_mode': 'HTML',
-            'disable_web_page_preview': True
-        }
+        chat_id = self.get_telegram_chat_id()
+        if not chat_id:
+            logger.error("Chat ID non disponibile")
+            return False
+        
         try:
+            url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
+            payload = {
+                'chat_id': chat_id,
+                'text': message,
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': True
+            }
+            
             response = requests.post(url, json=payload, timeout=10)
-            if response.status_code == 200:
-                logger.info("✅ Alert inviato su Telegram")
-                return True
-            else:
-                logger.error(f"❌ Errore Telegram: {response.status_code}")
-                return False
+            return response.json().get('ok', False)
+            
         except Exception as e:
-            logger.error(f"❌ Errore invio Telegram: {e}")
+            logger.error(f"Errore nell'invio messaggio Telegram: {e}")
             return False
-
-    def get_hot_posts(self, subreddit_name, limit=20):
-        """Recupera i post più hot da un subreddit"""
+    
+    def check_and_alert(self):
+        """Esegue il controllo e invia l'alert"""
+        logger.info("Avvio analisi tendenze Reddit...")
+        
         try:
-            subreddit = reddit.subreddit(subreddit_name)
-            posts = []
+            trends = self.get_reddit_trends()
+            message = self.format_alert_message(trends)
             
-            for post in subreddit.hot(limit=limit):
-                engagement = post.score + (post.num_comments * 2)
-                
-                posts.append({
-                    'subreddit': subreddit_name,
-                    'title': post.title,
-                    'score': post.score,
-                    'comments': post.num_comments,
-                    'engagement': engagement,
-                    'url': f"https://reddit.com{post.permalink}",
-                    'created': datetime.fromtimestamp(post.created_utc),
-                    'upvote_ratio': getattr(post, 'upvote_ratio', 0.95)
-                })
-            
-            logger.info(f"✅ r/{subreddit_name}: trovati {len(posts)} post")
-            return posts
-        except Exception as e:
-            logger.error(f"❌ Errore recupero post da r/{subreddit_name}: {e}")
-            return []
-
-    def analyze_trends(self, posts):
-        """Analizza i trend dai post"""
-        if not posts:
-            return [], []
-        
-        # Filtra post con alto engagement
-        hot_posts = [p for p in posts if p['engagement'] > 50]
-        
-        if not hot_posts:
-            return [], []
-        
-        # Analizza parole chiave nei titoli
-        all_titles = ' '.join([p['title'].lower() for p in hot_posts])
-        words = self.clean_text(all_titles)
-        
-        # Filtra stopwords
-        filtered_words = [w for w in words if w not in BASIC_STOPWORDS and len(w) > 2]
-        
-        # Trova trend
-        word_freq = Counter(filtered_words)
-        trends = word_freq.most_common(6)
-        
-        return trends, hot_posts
-
-    def clean_text(self, text):
-        """Pulisce il testo"""
-        text = re.sub(r'http\S+', '', text)
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip().split()
-
-    def calculate_engagement_stats(self, posts):
-        """Calcola statistiche di engagement"""
-        if not posts:
-            return 0, 0
-        
-        engagements = [p['engagement'] for p in posts]
-        avg_engagement = sum(engagements) / len(engagements)
-        hot_posts = len([p for p in posts if p['engagement'] > 50])
-        
-        return avg_engagement, hot_posts
-
-    def generate_report(self):
-        """Genera il report completo"""
-        logger.info("🔄 Analisi trend Reddit in corso...")
-        
-        all_reports = {}
-        
-        for subreddit in self.subreddits:
-            logger.info(f"📊 Analizzando r/{subreddit}...")
-            
-            posts = self.get_hot_posts(subreddit)
-            trends, hot_posts = self.analyze_trends(posts)
-            avg_engagement, hot_count = self.calculate_engagement_stats(posts)
-            
-            if trends:
-                top_post = max(hot_posts, key=lambda x: x['engagement']) if hot_posts else None
-                
-                all_reports[subreddit] = {
-                    'total_posts': len(posts),
-                    'hot_posts': hot_count,
-                    'avg_engagement': avg_engagement,
-                    'trends': trends,
-                    'top_post': top_post
-                }
-            
-            time.sleep(1)  # Rate limiting
-        
-        return all_reports
-
-    def format_telegram_message(self, reports):
-        """Formatta il messaggio per Telegram"""
-        if not reports:
-            return "🔍 Nessun trend significativo trovato nelle ultime analisi."
-        
-        message = []
-        message.append("🚀 <b>TREND REDDIT - LIVE ALERT</b>")
-        message.append(f"⏰ {datetime.now().strftime('%H:%M %d/%m/%Y')}")
-        message.append("")
-        
-        for subreddit, data in reports.items():
-            message.append(f"<b>📌 r/{subreddit}</b>")
-            message.append(f"   📊 Post totali: {data['total_posts']}")
-            message.append(f"   🔥 Post hot: {data['hot_posts']}")
-            message.append(f"   💪 Engagement medio: {data['avg_engagement']:.0f}")
-            
-            if data['trends']:
-                message.append("   🏷️ <b>Trend topics:</b>")
-                for word, count in data['trends'][:4]:
-                    message.append(f"      • {word} ({count}x)")
-            
-            if data['top_post']:
-                post = data['top_post']
-                title = post['title'][:70] + "..." if len(post['title']) > 70 else post['title']
-                message.append("   🏆 <b>Top post:</b>")
-                message.append(f"      📝 {title}")
-                message.append(f"      👍 {post['score']} ⬆️  💬 {post['comments']}")
-                message.append(f"      🔗 <a href='{post['url']}'>Vai al post</a>")
-            
-            message.append("")
-        
-        # Aggiungi summary
-        total_trends = sum(len(data['trends']) for data in reports.values())
-        message.append(f"<b>📈 RIEPILOGO:</b> {total_trends} trend topics trovati in {len(reports)} subreddit")
-        
-        return "\n".join(message)
-
-    def run_analysis(self):
-        """Esegue l'analisi completa"""
-        try:
-            logger.info("🎯 Avvio analisi Reddit Trend...")
-            
-            # Analizza i trend
-            reports = self.generate_report()
-            
-            # Genera il messaggio
-            message = self.format_telegram_message(reports)
-            
-            # Log del report
-            logger.info("📄 Report generato con successo")
-            
-            # Invia su Telegram
-            success = self.send_telegram_alert(message)
-            
-            if success:
-                logger.info("✅ Analisi completata e inviata!")
+            if self.send_telegram_alert(message):
+                logger.info("Alert inviato con successo")
             else:
-                logger.error("❌ Errore nell'invio del report")
-            
-            return success
-            
+                logger.error("Errore nell'invio dell'alert")
+                
         except Exception as e:
-            error_msg = f"💥 Errore durante l'analisi: {str(e)}"
-            logger.error(error_msg)
-            self.send_telegram_alert(f"❌ Errore bot: {str(e)}")
-            return False
+            logger.error(f"Errore durante il controllo: {e}")
+    
+    def run(self):
+        """Avvia il bot"""
+        logger.info("Reddit Trend Bot avviato")
+        
+        # Esegui immediatamente un controllo
+        self.check_and_alert()
+        
+        # Programma l'esecuzione ogni 15 minuti
+        schedule.every(15).minutes.do(self.check_and_alert)
+        
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
 
 def main():
-    """Funzione principale"""
-    logger.info("🤖 Reddit Trend Bot started")
-    
-    # Verifica configurazione
-    logger.info(f"🔧 Config: Reddit {'✅' if REDDIT_CLIENT_ID else '❌'}, Telegram {'✅' if TELEGRAM_BOT_TOKEN else '❌'}")
-    
-    bot = RedditTrendBot()
-    success = bot.run_analysis()
-    
-    if success:
-        logger.info("🎉 Bot eseguito con successo!")
-    else:
-        logger.error("❌ Bot fallito!")
-    
-    # Esci per Render (no loop infinito)
-    exit(0 if success else 1)
+    try:
+        bot = RedditTrendBot()
+        bot.run()
+    except Exception as e:
+        logger.error(f"Errore nell'avvio del bot: {e}")
 
 if __name__ == "__main__":
     main()
