@@ -1,10 +1,10 @@
 import os
 import requests
-import schedule
-import time
 import praw
 from datetime import datetime
 import logging
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 # Configurazione logging
 logging.basicConfig(level=logging.INFO)
@@ -69,16 +69,16 @@ class RedditTrendBot:
                     post_time = datetime.fromtimestamp(post.created_utc)
                     time_diff = (datetime.now() - post_time).total_seconds() / 60
                     
-                    # Considera solo post degli ultimi 15 minuti
-                    if time_diff <= 15:
+                    # Considera solo post degli ultimi 60 minuti (per avere più contenuti)
+                    if time_diff <= 60:
                         trend_score = (post.score + post.num_comments * 2) / (time_diff + 1)
                         
                         trends.append({
-                            'title': post.title,
+                            'title': post.title[:200],  # Limita lunghezza titolo
                             'subreddit': post.subreddit.display_name,
                             'score': post.score,
                             'comments': post.num_comments,
-                            'url': post.url,
+                            'url': f"https://reddit.com{post.permalink}",
                             'created_utc': post.created_utc,
                             'trend_score': trend_score
                         })
@@ -96,7 +96,7 @@ class RedditTrendBot:
         if not trends:
             return "🔍 Nessuna tendenza significativa negli ultimi 15 minuti"
         
-        message = "🚨 **TREND REDdit - Ultimi 15 minuti** 🚨\n\n"
+        message = "🚨 **TREND REDDIT - Ultimi 15 minuti** 🚨\n\n"
         
         for i, trend in enumerate(trends[:5], 1):
             message += f"{i}. **{trend['title']}**\n"
@@ -124,48 +124,54 @@ class RedditTrendBot:
             }
             
             response = requests.post(url, json=payload, timeout=10)
-            return response.json().get('ok', False)
-            
+            if response.json().get('ok', False):
+                logger.info("✅ Alert inviato con successo")
+                return True
+            else:
+                logger.error("❌ Errore nell'invio Telegram")
+                return False
+                
         except Exception as e:
-            logger.error(f"Errore nell'invio messaggio Telegram: {e}")
+            logger.error(f"❌ Errore nell'invio messaggio Telegram: {e}")
             return False
     
     def check_and_alert(self):
         """Esegue il controllo e invia l'alert"""
-        logger.info("Avvio analisi tendenze Reddit...")
+        logger.info("🔍 Avvio analisi tendenze Reddit...")
         
         try:
             trends = self.get_reddit_trends()
             message = self.format_alert_message(trends)
             
             if self.send_telegram_alert(message):
-                logger.info("Alert inviato con successo")
+                logger.info("✅ Analisi completata con successo")
             else:
-                logger.error("Errore nell'invio dell'alert")
+                logger.error("❌ Errore nell'invio dell'alert")
                 
         except Exception as e:
-            logger.error(f"Errore durante il controllo: {e}")
-    
-    def run(self):
-        """Avvia il bot"""
-        logger.info("Reddit Trend Bot avviato")
-        
-        # Esegui immediatamente un controllo
-        self.check_and_alert()
-        
-        # Programma l'esecuzione ogni 15 minuti
-        schedule.every(15).minutes.do(self.check_and_alert)
-        
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
+            logger.error(f"❌ Errore durante il controllo: {e}")
 
 def main():
     try:
         bot = RedditTrendBot()
-        bot.run()
+        
+        # Configura scheduler
+        scheduler = BlockingScheduler()
+        
+        # Esegui immediatamente e poi ogni 15 minuti
+        bot.check_and_alert()
+        scheduler.add_job(
+            bot.check_and_alert,
+            trigger=IntervalTrigger(minutes=15),
+            id='reddit_trend_check',
+            name='Check Reddit trends every 15 minutes'
+        )
+        
+        logger.info("🤖 Reddit Trend Bot avviato - Controllo ogni 15 minuti")
+        scheduler.start()
+        
     except Exception as e:
-        logger.error(f"Errore nell'avvio del bot: {e}")
+        logger.error(f"❌ Errore nell'avvio del bot: {e}")
 
 if __name__ == "__main__":
     main()
